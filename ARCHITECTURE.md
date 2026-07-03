@@ -189,3 +189,19 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    `dict[str, Provider]`), by mypy je weryfikował, i mieć własne testy `await`/assert.
    Pakiet dostaje znacznik PEP 561 `py.typed` — repo importujące `llmbus` też korzysta z
    typów (wsad do decyzji **#3** o dystrybucji klienta).
+9. **GPT-5 a `params` (§4) — polityka `temperature`.** Zweryfikowane w SDK (lipiec 2026):
+   cała rodzina GPT-5 (gpt-5/mini/nano) przez Chat Completions **odrzuca `temperature` inne
+   niż domyślne (1)** — 400 „Unsupported value: 'temperature'… Only the default (1) value is
+   supported" — i wymaga **`max_completion_tokens`, nie `max_tokens`**. Kłóci się to z §4
+   (przykład `"temperature": 0`) i §7 („OpenAI 0–2"). `max_tokens` → `max_completion_tokens`
+   to czyste mapowanie w adapterze (bez decyzji). Do rozstrzygnięcia — **polityka
+   temperatury**, gdy job ustawia wartość, której model nie honoruje:
+   - (A, rekomendacja) **waliduj i odrzuć wcześnie**: `JobParams.temperature` opcjonalne
+     (`None` domyślnie, nie `0`); jawnie ustawiona nieobsługiwana wartość → błąd przed
+     wywołaniem API (fail-loud, jak §4). Wymaga aktualizacji §4 (temperature opcjonalne)
+     i §7 (obsługa temperatury per-model).
+   - (B) **cicho pomiń dla GPT-5**: adapter nie wysyła temperatury; wbrew fail-loud
+     (`temperature=0` znika bez ostrzeżenia).
+   - (C) **przepuść i pozwól na 400**: najprościej, ale błąd po zakolejkowaniu, nieczytelny.
+   Blokuje `feat/provider-adapters` (adapter OpenAI). Reasoning tokens GPT-5 rozliczane jako
+   output → `completion_tokens` → `output_tokens` (do weryfikacji przy implementacji).
