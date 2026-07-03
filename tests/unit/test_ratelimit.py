@@ -208,6 +208,32 @@ def test_provider_limiter_rejects_negative_tokens_without_charging_requests():
     assert limiter.reserve(0, tokens=0) == 1.0
 
 
+@pytest.mark.parametrize(
+    ("tokens", "requests"),
+    [
+        (0, -1),
+        (1, -1),
+        (-1, -1),
+    ],
+)
+def test_provider_limiter_rejects_negative_requests_without_charging_any_bucket(tokens, requests):
+    limiter = ProviderLimiter(ProviderLimits(requests_per_min=60, tokens_per_min=6000), now=0)
+
+    with pytest.raises(ValueError, match=r"^amount must be non-negative$"):
+        limiter.reserve(0, tokens=tokens, requests=requests)
+
+    # Requests are still untouched.
+    waits = [limiter.reserve(0, tokens=0) for _ in range(60)]
+    assert waits == [0.0] * 60
+    assert limiter.reserve(0, tokens=0) == 1.0
+
+    # Tokens are still untouched too: a full token burst remains free.
+    fresh = ProviderLimiter(ProviderLimits(requests_per_min=60, tokens_per_min=6000), now=0)
+    with pytest.raises(ValueError, match=r"^amount must be non-negative$"):
+        fresh.reserve(0, tokens=tokens, requests=requests)
+    assert fresh.reserve(0, tokens=6000) == 0.0
+
+
 # --- RateLimiter -------------------------------------------------------------
 
 
@@ -245,6 +271,16 @@ def test_ratelimiter_rejects_negative_tokens_without_charging_requests():
 
     waits = [limiter.reserve("openai", 0) for _ in range(60)]
     assert waits == [0.0] * 60
+    assert limiter.reserve("openai", 0) == 1.0
+
+
+def test_ratelimiter_unknown_provider_does_not_mutate_known_provider():
+    limiter = RateLimiter({"openai": ProviderLimits(60, 6000)}, clock=FakeClock(0))
+
+    with pytest.raises(UnknownProviderError, match="anthropic"):
+        limiter.reserve("anthropic", -1)
+
+    assert [limiter.reserve("openai", 0) for _ in range(60)] == [0.0] * 60
     assert limiter.reserve("openai", 0) == 1.0
 
 
