@@ -59,12 +59,26 @@ def test_bucket_wait_is_deficit_over_rate():
     assert bucket.reserve(0, 10) == 1.0
 
 
+def test_bucket_allows_single_reservation_larger_than_capacity():
+    bucket = TokenBucket(rate=10, capacity=60, now=0)
+    # 120 spends the full 60-token burst and reserves another 60 tokens.
+    assert bucket.reserve(0, 120) == 6.0
+    # A same-instant follower inherits the previous deficit.
+    assert bucket.reserve(0, 10) == 7.0
+
+
 def test_bucket_refills_continuously_with_elapsed_time():
     bucket = TokenBucket(rate=10, capacity=60, now=0)
     assert bucket.reserve(0, 60) == 0.0  # empty at t=0
     # 3s later, 30 tokens have refilled; asking for 30 is free, 31 waits 0.1s.
     assert bucket.reserve(3, 30) == 0.0
     assert bucket.reserve(3, 1) == pytest.approx(0.1)
+
+
+def test_bucket_fractional_elapsed_reduces_existing_deficit():
+    bucket = TokenBucket(rate=10, capacity=60, now=0)
+    assert bucket.reserve(0, 70) == 1.0
+    assert bucket.reserve(0.25, 0) == 0.75
 
 
 def test_bucket_reservation_serializes_concurrent_callers():
@@ -182,6 +196,18 @@ def test_provider_limiter_honours_explicit_request_count():
     assert limiter.reserve(0, tokens=0, requests=1) == 1.0
 
 
+def test_provider_limiter_rejects_negative_tokens_without_charging_requests():
+    limiter = ProviderLimiter(ProviderLimits(requests_per_min=60, tokens_per_min=6000), now=0)
+
+    with pytest.raises(ValueError, match=r"^amount must be non-negative$"):
+        limiter.reserve(0, tokens=-1)
+
+    # The failed reservation must be all-or-nothing: all 60 request slots remain.
+    waits = [limiter.reserve(0, tokens=0) for _ in range(60)]
+    assert waits == [0.0] * 60
+    assert limiter.reserve(0, tokens=0) == 1.0
+
+
 # --- RateLimiter -------------------------------------------------------------
 
 
@@ -209,6 +235,17 @@ def test_ratelimiter_unknown_provider_raises():
     limiter = RateLimiter({"openai": ProviderLimits(60, 6000)}, clock=FakeClock(0))
     with pytest.raises(UnknownProviderError, match="anthropic"):
         limiter.reserve("anthropic", 10)
+
+
+def test_ratelimiter_rejects_negative_tokens_without_charging_requests():
+    limiter = RateLimiter({"openai": ProviderLimits(60, 6000)}, clock=FakeClock(0))
+
+    with pytest.raises(ValueError, match=r"^amount must be non-negative$"):
+        limiter.reserve("openai", -1)
+
+    waits = [limiter.reserve("openai", 0) for _ in range(60)]
+    assert waits == [0.0] * 60
+    assert limiter.reserve("openai", 0) == 1.0
 
 
 def test_ratelimiter_uses_the_injected_clock():

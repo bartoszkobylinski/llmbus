@@ -46,6 +46,13 @@ class ProviderLimits:
             raise ValueError("per-minute limits must be positive")
 
 
+def _require_non_negative(amount: float) -> None:
+    """Reject a negative bucket amount. Called *before* any bucket is charged so a
+    bad reservation is all-or-nothing and never silently consumes capacity."""
+    if amount < 0:
+        raise ValueError("amount must be non-negative")
+
+
 class TokenBucket:
     """A continuously-refilling token bucket.
 
@@ -69,8 +76,7 @@ class TokenBucket:
         """Reserve `amount` units and return the seconds to wait before they are
         available (0.0 if immediately). The units are always granted; the wait is
         how long the caller must hold off to stay within the rate."""
-        if amount < 0:
-            raise ValueError("amount must be non-negative")
+        _require_non_negative(amount)
         # Refill, branch-free: clamp elapsed at 0 so a non-monotonic (backward)
         # clock can never *drain* the bucket, and `_updated` only ever moves
         # forward. A clamped-zero elapsed refills by nothing, so this matches an
@@ -97,6 +103,11 @@ class ProviderLimiter:
         """Reserve one job's requests and tokens; return the longer of the two
         required waits. Both buckets are always charged so neither limit is ever
         exceeded, even when only one is the binding constraint."""
+        # Validate tokens before charging the request bucket: otherwise a job that
+        # fails token validation would still consume a request slot, letting a bad
+        # caller shrink capacity through failures. (Negative requests are already
+        # atomic — that bucket is charged first and validates before mutating.)
+        _require_non_negative(tokens)
         wait_requests = self._requests.reserve(now, requests)
         wait_tokens = self._tokens.reserve(now, tokens)
         return max(wait_requests, wait_tokens)
