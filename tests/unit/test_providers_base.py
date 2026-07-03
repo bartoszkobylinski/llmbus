@@ -1,6 +1,7 @@
 """Unit tests for the provider abstraction and model→provider routing (§7)."""
 
 import pytest
+from pydantic import ValidationError
 
 from llmbus.cost import PRICING
 from llmbus.providers.base import (
@@ -110,6 +111,15 @@ def test_provider_result_rejects_priced_usage():
         "providers must not price a result; leave usage.cost_usd at its "
         "0.0 default (cost.py fills it, §6), got 0.01"
     )
+
+
+def test_provider_result_usage_cannot_be_repriced_after_construction():
+    # The construction guard forbids priced usage; Usage being frozen forbids
+    # bypassing it by mutating cost_usd afterward. A shallow-frozen ProviderResult
+    # alone would not stop this — the immutability has to live on Usage.
+    result = ProviderResult(completion="hi", usage=Usage(input_tokens=1, output_tokens=1))
+    with pytest.raises(ValidationError):
+        result.usage.cost_usd = 0.02
 
 
 def test_provider_result_is_frozen():

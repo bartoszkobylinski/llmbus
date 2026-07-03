@@ -199,6 +199,15 @@ def test_usage_defaults_to_zero():
     assert usage.cost_usd == 0.0
 
 
+def test_usage_is_frozen():
+    # Immutable so a completed job's token/cost record can't drift after the fact,
+    # and so the provider "never price" guard (§7) can't be bypassed by mutating
+    # cost_usd post-construction.
+    usage = Usage(input_tokens=1, output_tokens=2)
+    with pytest.raises(ValidationError):
+        usage.cost_usd = 0.5
+
+
 # --- Result ------------------------------------------------------------------
 
 
@@ -214,15 +223,16 @@ def test_result_ok_defaults():
     assert result.meta == {}
 
 
-def test_result_default_containers_are_not_shared():
+def test_result_default_meta_is_not_shared():
+    # meta is a mutable dict, so each Result must get its own default instance.
+    # (Usage is frozen now, so its default is safe to share and needs no guard.)
     first = Result(job_id=_JOB_ID, status="ok")
     second = Result(job_id=_JOB_ID_2, status="ok")
 
-    first.usage.input_tokens = 10
     first.meta["comment_id"] = "42"
 
-    assert second.usage == Usage()
     assert second.meta == {}
+    assert second.usage == Usage()
 
 
 def test_result_error_carries_message_and_meta():

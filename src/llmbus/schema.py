@@ -89,7 +89,7 @@ class Usage(BaseModel):
     hence the aliased fields). Serialize with `model_dump(by_alias=True)`.
     """
 
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
 
     input_tokens: int = Field(default=0, alias="in")
     output_tokens: int = Field(default=0, alias="out")
