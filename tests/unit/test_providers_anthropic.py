@@ -64,6 +64,24 @@ def test_multiple_system_messages_are_joined():
     assert system == "a\n\nb"
 
 
+def test_system_messages_are_removed_without_reordering_chat_messages():
+    system, chat = _anthropic_system_and_messages(
+        [
+            Message(role="user", content="first"),
+            Message(role="system", content="rules"),
+            Message(role="assistant", content="second"),
+            Message(role="user", content="third"),
+        ]
+    )
+
+    assert system == "rules"
+    assert chat == [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+        {"role": "user", "content": "third"},
+    ]
+
+
 # --- max_tokens (required by Anthropic) --------------------------------------
 
 
@@ -91,6 +109,19 @@ def test_request_includes_system_when_present():
         JobParams(max_tokens=64),
     )
     assert request["system"] == "be terse"
+
+
+def test_request_rejects_response_format_instead_of_silently_dropping_it():
+    with pytest.raises(ValueError) as exc_info:
+        _anthropic_request(
+            "claude-opus-4-8",
+            _USER,
+            JobParams(max_tokens=64, response_format="json_object"),
+        )
+    assert str(exc_info.value) == (
+        "the Anthropic adapter does not support response_format in v1 "
+        "(Anthropic uses output_config.format, not a bare string); leave it unset"
+    )
 
 
 # --- temperature (per-model) -------------------------------------------------
@@ -158,6 +189,17 @@ def test_completion_rejects_response_with_no_text_block():
     assert str(exc_info.value) == "Anthropic response carried no text block"
 
 
+def test_completion_rejects_text_block_with_none_text():
+    blocks = [SimpleNamespace(type="text", text=None)]
+    with pytest.raises(ValueError) as exc_info:
+        _completion_from_response(_response(blocks=blocks))
+    assert str(exc_info.value) == "Anthropic response carried no text block"
+
+
+def test_completion_allows_empty_text_block():
+    assert _completion_from_response(_response(text="")) == ""
+
+
 def test_usage_maps_tokens_and_leaves_cost_zero():
     usage = _usage_from_anthropic(SimpleNamespace(input_tokens=7, output_tokens=11))
     assert usage == Usage(input_tokens=7, output_tokens=11)
@@ -201,5 +243,15 @@ async def test_call_rejects_unsupported_temperature_before_touching_the_client()
 
     with pytest.raises(ValueError):
         await adapter.call("claude-opus-4-8", _USER, JobParams(max_tokens=64, temperature=0.5))
+
+    client.messages.create.assert_not_awaited()
+
+
+async def test_call_rejects_missing_max_tokens_before_touching_the_client():
+    client = _client(_response())
+    adapter = AnthropicAdapter(client)
+
+    with pytest.raises(ValueError, match="requires max_tokens"):
+        await adapter.call("claude-opus-4-8", _USER, JobParams())
 
     client.messages.create.assert_not_awaited()

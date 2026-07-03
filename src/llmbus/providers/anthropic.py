@@ -69,6 +69,11 @@ def _anthropic_request(
         raise ValueError(
             f"Anthropic requires max_tokens; set params.max_tokens for model {model!r}"
         )
+    if params.response_format is not None:
+        raise ValueError(
+            "the Anthropic adapter does not support response_format in v1 "
+            "(Anthropic uses output_config.format, not a bare string); leave it unset"
+        )
     system, chat = _anthropic_system_and_messages(messages)
     request: dict[str, Any] = {"model": model, "max_tokens": params.max_tokens, "messages": chat}
     if system is not None:
@@ -80,9 +85,14 @@ def _anthropic_request(
 
 
 def _completion_from_response(response: Any) -> str:
-    """Return the first text block's text, rejecting a response that has none."""
+    """Return the first text block's text, rejecting a response that has none.
+
+    A `text` block whose `text` is None is treated as no usable text (it would
+    otherwise escape as `completion=None`, violating `ProviderResult.completion:
+    str`); an empty string is a valid completion.
+    """
     for block in response.content:
-        if block.type == "text":
+        if block.type == "text" and block.text is not None:
             text: str = block.text
             return text
     raise ValueError("Anthropic response carried no text block")
