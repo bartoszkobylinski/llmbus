@@ -1,0 +1,23 @@
+# LOCAL DEV ONLY. Spins up an Apache Iggy broker for development and
+# integration tests on this laptop.
+#
+# PROD (VPS) does NOT use Docker: the Iggy server runs as a systemd unit from a
+# GitHub-release binary, bound to 127.0.0.1:8090 (see ARCHITECTURE.md §9b).
+# Never point dev code at the prod broker — dev gets its own throwaway log.
+#
+# NOTE: the credential/flag handling of the apache/iggy image is verified at the
+# first live connect (the client PR), not here.
+services:
+  iggy:
+    image: apache/iggy:latest
+    container_name: llmbus-iggy
+    ports:
+      - "8090:8090"   # TCP  — the SDK talks this
+      - "3000:3000"   # HTTP — health/stats
+      - "8080:8080"   # QUIC
+    volumes:
+      - iggy-data:/local_data
+    restart: unless-stopped
+
+volumes:
+  iggy-data:

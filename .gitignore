@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtualenv (uv, in-project)
+.venv/
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+mutants/
+.mutmut-cache
+
+# Secrets & local data
+.env
+*.db
+*.sqlite3
+local_data/
+
+# OS
+.DS_Store
