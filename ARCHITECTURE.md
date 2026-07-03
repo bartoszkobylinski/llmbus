@@ -70,6 +70,11 @@ Kroki:
   "usage": {"in": 0, "out": 0, "cost_usd": 0.0}, "provider": "openai",
   "error": null, "meta": {"comment_id": "…"} }
 ```
+**Walidacja (v1, ścisła — Pydantic):**
+- **`extra="forbid"`** na wszystkich modelach kontraktu — nieznane pole (np. literówka `callback` zamiast `callback_url`) = błąd od razu, nie ciche zgubienie. `meta` zostaje dowolnym słownikiem, więc elastyczność nie ucierpia.
+- **`job_id` musi być poprawnym UUID** (generowany jako `uuid4`) — to klucz w store i podstawa idempotencji/dedupu (§6); pusty/„prosty" id groziłby kolizją klucza.
+- **`max_tokens` > 0** jeśli podane (nieprawidłowe u każdego providera). **`temperature` bez ograniczeń w kontrakcie** — zakresy różnią się per provider (OpenAI 0–2, Anthropic 0–1), więc waliduje/normalizuje je adapter providera (§7).
+
 **Uwaga o nagłówkach Iggy:** metadane (`project`, `model`, `priority`) logicznie należą do **nagłówków wiadomości**, ale Python SDK ich nie ma → w v1 wszystko idzie w body JSON. To jest dokładnie miejsce na ewentualną rozbudowę SDK (nagłówki).
 
 ## 5. Topiki i partycjonowanie
