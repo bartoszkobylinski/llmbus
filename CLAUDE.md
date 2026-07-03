@@ -35,6 +35,7 @@ docker compose up -d                     # local Iggy for dev/integration tests
 uv run pytest -m "not integration"       # fast suite (no server needed)
 uv run pytest                            # full suite (requires local Iggy)
 uv run mutmut run                        # mutation testing (scoped, see below)
+uv run mypy                              # static type gate (strict, src/ only)
 uv run ruff check . && uv run ruff format --check .
 ```
 
@@ -60,6 +61,11 @@ tests/
 This project's whole point is reliability of infrastructure code, so tests are not optional
 polish; they gate every merge.
 
+**Mandatory merge gate — all must pass, no exceptions:** `ruff check` + `ruff format --check`,
+`mypy` (strict, `src/`), the full `pytest` suite, ≥90% coverage on `src/llmbus/`, and `mutmut`
+**0 surviving mutants** on the scoped pure-logic modules. A branch is not merge-ready until
+every one is green.
+
 - **Unit tests** (`tests/unit/`): pure logic only — ratelimit, cost, schema, provider
   routing, idempotency. No network, no Iggy. Mock at *our* bus-abstraction boundary;
   the SDK's Rust-native classes cannot be deeply monkeypatched — never try.
@@ -69,6 +75,15 @@ polish; they gate every merge.
 - **pytest-asyncio** (`asyncio_mode = "auto"`) for everything async.
 - **Coverage:** `pytest-cov`, fail under 90% on `src/llmbus/` (integration paths may be
   excluded with `# pragma: no cover` only when genuinely unreachable in unit runs).
+- **Static typing (`mypy`):** `uv run mypy` (`--strict`, `src/` only) is a mandatory gate —
+  zero errors. It is the *only* thing that enforces the **semantic** half of the `Provider`
+  contract: that `call` is `async`, returns a `ProviderResult`, and `name` is a `str`.
+  `@runtime_checkable` / `isinstance()` check attribute *presence* only, never shape (see
+  `test_runtime_protocol_check_is_structural_not_semantic`). So concrete adapters must be
+  reached through a typed seam (e.g. a `dict[str, Provider]` registry) for mypy to verify
+  them, and carry per-adapter `await`/assert tests. Tests are excluded from mypy, mirroring
+  the ruff `tests/** = ANN` ignore. The package ships a PEP 561 `py.typed` marker, so repos
+  importing `llmbus` type-check against it too.
 - **Mutation testing (`mutmut`):** scoped to pure-logic modules only —
   `schema.py`, `ratelimit.py`, `cost.py`, `providers/base.py`, routing logic.
   Never run mutations over integration-touching code (worker loop, store I/O, client) —

@@ -180,3 +180,12 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
 5. ~~Iggy server: docker lokalnie → potem VPS?~~ **ROZSTRZYGNIĘTE (sekcja 9b):** prod = binarka pod systemd na VPS (port 8090 localhost, nginx poza ścieżką); dev = osobny lokalny Iggy (Docker na macu), nie łączymy się do prod. Jeden serwer na VPS dla wszystkich projektów.
 6. Model klasyfikacji dla hate-mod: który z rodziny GPT-5 (gpt-5-mini/nano) lub Anthropic? (OpenAI = GPT-5, nie 4o.)
 7. Sync (poll `await_result`) vs async (callback) — czy oba wspieramy w v1, czy tylko callback?
+8. ~~Statyczne typowanie: wprowadzać type-checker do bramki merge?~~ **ROZSTRZYGNIĘTE:**
+   `mypy --strict` nad `src/` to **obowiązkowa bramka merge** (0 błędów; testy wyłączone,
+   analogicznie do ruff `tests/** = ANN`). To jedyne, co egzekwuje **semantyczną** stronę
+   kontraktu `Provider` (§7) — że `call` jest `async` i zwraca `ProviderResult`, a `name`
+   jest `str`; `@runtime_checkable`/`isinstance` sprawdza tylko *obecność* atrybutów, nie
+   ich kształt. Dlatego adaptery muszą być podpięte przez otypowany szew (np. rejestr
+   `dict[str, Provider]`), by mypy je weryfikował, i mieć własne testy `await`/assert.
+   Pakiet dostaje znacznik PEP 561 `py.typed` — repo importujące `llmbus` też korzysta z
+   typów (wsad do decyzji **#3** o dystrybucji klienta).
