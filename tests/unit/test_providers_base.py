@@ -1,0 +1,101 @@
+"""Unit tests for the provider abstraction and model→provider routing (§7)."""
+
+import pytest
+
+from llmbus.cost import PRICING
+from llmbus.providers.base import (
+    PROVIDERS,
+    Provider,
+    ProviderResult,
+    UnknownModelError,
+    provider_for,
+)
+from llmbus.schema import JobParams, Message, Usage
+
+# The routing table spelled out literally, so a mutated value (or a model
+# silently re-homed to the wrong provider) is caught.
+_EXPECTED_ROUTES = {
+    "gpt-5": "openai",
+    "gpt-5-mini": "openai",
+    "gpt-5-nano": "openai",
+    "claude-opus-4-8": "anthropic",
+    "claude-sonnet-5": "anthropic",
+    "claude-haiku-4-5": "anthropic",
+}
+
+
+# --- Routing table -----------------------------------------------------------
+
+
+def test_routing_table_matches_documented_routes():
+    assert PROVIDERS == _EXPECTED_ROUTES
+
+
+@pytest.mark.parametrize(("model", "provider"), sorted(_EXPECTED_ROUTES.items()))
+def test_provider_for_routes_each_model(model, provider):
+    assert provider_for(model) == provider
+
+
+def test_provider_for_unknown_model_raises():
+    with pytest.raises(UnknownModelError, match="gpt-4o-mini"):
+        provider_for("gpt-4o-mini")
+
+
+def test_routing_covers_exactly_the_priced_models():
+    # Single source of truth: every priced model must have a route and every
+    # routed model must have a price — neither table may drift ahead of the other.
+    assert set(PROVIDERS) == set(PRICING)
+
+
+def test_every_route_names_a_known_provider():
+    assert set(PROVIDERS.values()) == {"openai", "anthropic"}
+
+
+# --- ProviderResult ----------------------------------------------------------
+
+
+def test_provider_result_carries_completion_and_usage():
+    usage = Usage(input_tokens=10, output_tokens=20)
+    result = ProviderResult(completion="hello", usage=usage)
+    assert result.completion == "hello"
+    assert result.usage is usage
+
+
+def test_provider_result_defaults_cost_to_zero_pending_pricing():
+    # Providers don't price; cost_usd stays 0.0 until cost.py fills it downstream.
+    result = ProviderResult(completion="hi", usage=Usage(input_tokens=1, output_tokens=1))
+    assert result.usage.cost_usd == 0.0
+
+
+def test_provider_result_is_frozen():
+    result = ProviderResult(completion="hi", usage=Usage())
+    with pytest.raises(Exception):  # noqa: B017 - FrozenInstanceError is dataclass-internal
+        result.completion = "changed"
+
+
+# --- Provider protocol -------------------------------------------------------
+
+
+class _ConformingAdapter:
+    name = "openai"
+
+    async def call(self, model, messages, params):
+        return ProviderResult(completion="ok", usage=Usage())
+
+
+def test_conforming_adapter_satisfies_provider_protocol():
+    assert isinstance(_ConformingAdapter(), Provider)
+
+
+def test_adapter_missing_call_is_not_a_provider():
+    class _NoCall:
+        name = "openai"
+
+    assert not isinstance(_NoCall(), Provider)
+
+
+async def test_conforming_adapter_returns_a_provider_result():
+    adapter = _ConformingAdapter()
+    result = await adapter.call("gpt-5", [Message(role="user", content="hi")], JobParams())
+    assert isinstance(result, ProviderResult)
+    assert result.completion == "ok"
