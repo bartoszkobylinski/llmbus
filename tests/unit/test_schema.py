@@ -18,7 +18,7 @@ def _minimal_job(**overrides):
     data = {
         "project": "hate-moderator",
         "kind": "classify",
-        "model": "gpt-4o-mini",
+        "model": "gpt-5-mini",
         "messages": [Message(role="user", content="hi")],
     }
     data.update(overrides)
@@ -375,7 +375,7 @@ def test_job_id_normalizes_to_same_store_key_from_model_validate_payloads():
         "job_id": _JOB_ID.replace("-", ""),
         "project": "hate-moderator",
         "kind": "classify",
-        "model": "gpt-4o-mini",
+        "model": "gpt-5-mini",
         "messages": [{"role": "user", "content": "hi"}],
     }
     assert Job.model_validate(job_payload).job_id == _JOB_ID
@@ -415,7 +415,7 @@ def test_job_id_rejects_non_string_inputs_from_model_validate(bad_id):
         "job_id": bad_id,
         "project": "hate-moderator",
         "kind": "classify",
-        "model": "gpt-4o-mini",
+        "model": "gpt-5-mini",
         "messages": [{"role": "user", "content": "hi"}],
     }
     with pytest.raises(ValidationError):
@@ -430,7 +430,7 @@ def test_job_id_rejects_non_string_inputs_from_json_payloads(bad_id):
         "job_id": bad_id,
         "project": "hate-moderator",
         "kind": "classify",
-        "model": "gpt-4o-mini",
+        "model": "gpt-5-mini",
         "messages": [{"role": "user", "content": "hi"}],
     }
     with pytest.raises(ValidationError):

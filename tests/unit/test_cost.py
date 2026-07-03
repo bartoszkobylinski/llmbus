@@ -54,7 +54,7 @@ def test_cost_returns_decimal_not_float():
 
 def test_unknown_model_raises():
     with pytest.raises(UnknownModelError):
-        cost_usd("gpt-4o-mini", 100, 100)  # deliberately not in the table
+        cost_usd("unpriced-model-xyz", 100, 100)  # deliberately not in the table
 
 
 def test_unknown_model_error_is_a_key_error():
@@ -84,8 +84,8 @@ def test_price_for_unknown_raises():
 
 def test_unknown_model_error_names_the_model():
     # The error carries the offending model name, so it isn't a blank KeyError.
-    with pytest.raises(UnknownModelError, match="gpt-4o-mini"):
-        price_for("gpt-4o-mini")
+    with pytest.raises(UnknownModelError, match="unpriced-model-xyz"):
+        price_for("unpriced-model-xyz")
 
 
 def test_model_pricing_is_immutable():
