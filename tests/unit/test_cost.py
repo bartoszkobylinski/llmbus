@@ -102,9 +102,7 @@ def test_sonnet5_output_rate_switches_on_the_cutoff_date():
 def test_cost_uses_supplied_job_date_not_current_date():
     # This test should pass regardless of the calendar date on the machine
     # running it: the caller supplies the job's submitted_at date.
-    assert cost_usd("claude-sonnet-5", 1_000_000, 1_000_000, _INTRO_LAST_DAY) == Decimal(
-        "12.00"
-    )
+    assert cost_usd("claude-sonnet-5", 1_000_000, 1_000_000, _INTRO_LAST_DAY) == Decimal("12.00")
     assert cost_usd("claude-sonnet-5", 1_000_000, 1_000_000, _STANDARD_FIRST_DAY) == Decimal(
         "18.00"
     )
