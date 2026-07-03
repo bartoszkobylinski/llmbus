@@ -91,4 +91,5 @@ source_paths = [
     "src/llmbus/providers/__init__.py",
     "src/llmbus/providers/base.py",
     "src/llmbus/providers/openai.py",
+    "src/llmbus/providers/anthropic.py",
 ]
