@@ -72,6 +72,12 @@ def test_pricing_rates_are_decimal_values_not_float():
             assert isinstance(point.pricing.output_per_mtok, Decimal)
 
 
+def test_pricing_histories_follow_oldest_first_convention():
+    for points in PRICING.values():
+        effective_dates = [point.effective for point in points]
+        assert effective_dates == sorted(effective_dates)
+
+
 # --- Effective-dated resolution ----------------------------------------------
 
 
@@ -86,6 +92,47 @@ def test_pricing_rates_are_decimal_values_not_float():
 )
 def test_sonnet5_rate_switches_on_the_cutoff_date(on, expected_input_rate):
     assert cost_usd("claude-sonnet-5", 1_000_000, 0, on) == Decimal(expected_input_rate)
+
+
+def test_sonnet5_output_rate_switches_on_the_cutoff_date():
+    assert cost_usd("claude-sonnet-5", 0, 1_000_000, _INTRO_LAST_DAY) == Decimal("10.00")
+    assert cost_usd("claude-sonnet-5", 0, 1_000_000, _STANDARD_FIRST_DAY) == Decimal("15.00")
+
+
+def test_cost_uses_supplied_job_date_not_current_date():
+    # This test should pass regardless of the calendar date on the machine
+    # running it: the caller supplies the job's submitted_at date.
+    assert cost_usd("claude-sonnet-5", 1_000_000, 1_000_000, _INTRO_LAST_DAY) == Decimal(
+        "12.00"
+    )
+    assert cost_usd("claude-sonnet-5", 1_000_000, 1_000_000, _STANDARD_FIRST_DAY) == Decimal(
+        "18.00"
+    )
+
+
+def test_price_for_chooses_latest_effective_point_before_or_on_date(monkeypatch):
+    monkeypatch.setitem(
+        PRICING,
+        "test-multi-point",
+        (
+            PricePoint(date(2030, 1, 1), ModelPricing(Decimal("30.00"), Decimal("300.00"))),
+            PricePoint(date(2020, 1, 1), ModelPricing(Decimal("10.00"), Decimal("100.00"))),
+            PricePoint(date(2025, 1, 1), ModelPricing(Decimal("20.00"), Decimal("200.00"))),
+        ),
+    )
+
+    assert price_for("test-multi-point", date(2024, 12, 31)) == ModelPricing(
+        Decimal("10.00"), Decimal("100.00")
+    )
+    assert price_for("test-multi-point", date(2025, 1, 1)) == ModelPricing(
+        Decimal("20.00"), Decimal("200.00")
+    )
+    assert price_for("test-multi-point", date(2029, 12, 31)) == ModelPricing(
+        Decimal("20.00"), Decimal("200.00")
+    )
+    assert price_for("test-multi-point", date(2030, 1, 1)) == ModelPricing(
+        Decimal("30.00"), Decimal("300.00")
+    )
 
 
 def test_no_price_before_earliest_effective_date():
