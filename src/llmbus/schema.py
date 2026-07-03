@@ -27,9 +27,13 @@ def _utcnow() -> datetime:
 
 
 def _ensure_uuid(value: str) -> str:
-    """Reject ids that aren't well-formed UUIDs (store-key / dedup integrity, §6)."""
-    uuid.UUID(value)
-    return value
+    """Canonicalize to a lowercase-hyphenated UUID string; reject non-UUIDs.
+
+    `uuid.UUID` also accepts uppercase / `urn:uuid:` / `{...}` forms, so we
+    normalize them — one logical id must not become two store keys (§6).
+    Whitespace-padded values still raise (they are not stripped).
+    """
+    return str(uuid.UUID(value))
 
 
 # job_id stays a `str` (clean as a SQLite key / URL / dict key) but must parse as

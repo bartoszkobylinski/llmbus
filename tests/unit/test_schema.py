@@ -99,6 +99,7 @@ def test_job_meta_is_preserved_untouched():
     meta = {
         "comment_id": "42",
         "nested": {"a": 1},
+        "provider_hints": {"extra": {"arbitrary": "payload"}},
         "labels": ["spam", "review"],
         "flagged": False,
         "score": 0.25,
@@ -161,6 +162,18 @@ def test_usage_rejects_both_alias_and_field_name_for_same_field():
         Usage.model_validate(
             {"in": 5, "input_tokens": 999, "out": 7, "output_tokens": 888, "cost_usd": 0.02}
         )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"in": 5, "input_tokens": 999, "out": 7, "cost_usd": 0.02},
+        {"in": 5, "out": 7, "output_tokens": 888, "cost_usd": 0.02},
+    ],
+)
+def test_usage_rejects_partial_alias_and_field_name_conflicts(payload):
+    with pytest.raises(ValidationError):
+        Usage.model_validate(payload)
 
 
 def test_usage_round_trips_through_wire_json_with_keyword_aliases():
@@ -268,9 +281,34 @@ def test_job_rejects_unknown_field():
         _minimal_job(callback="http://x/cb")
 
 
+def test_job_rejects_unknown_field_in_nested_message():
+    with pytest.raises(ValidationError):
+        _minimal_job(messages=[{"role": "user", "content": "hi", "name": "operator"}])
+
+
+def test_job_rejects_unknown_field_in_nested_params():
+    with pytest.raises(ValidationError):
+        _minimal_job(params={"temperature": 0.5, "timeout_seconds": 30})
+
+
+def test_meta_remains_free_form_while_contract_models_forbid_extras():
+    meta = {
+        "callback": "not the contract callback_url",
+        "params": {"timeout_seconds": 30},
+        "messages": [{"role": "tool", "content": "kept as metadata"}],
+    }
+    assert _minimal_job(meta=meta).meta == meta
+    assert Result(job_id=_JOB_ID, status="ok", meta=meta).meta == meta
+
+
 def test_result_rejects_unknown_field():
     with pytest.raises(ValidationError):
         Result(job_id=_JOB_ID, status="ok", complete="done")
+
+
+def test_result_rejects_unknown_field_in_nested_usage():
+    with pytest.raises(ValidationError):
+        Result(job_id=_JOB_ID, status="ok", usage={"in": 1, "out": 2, "total": 3})
 
 
 def test_job_params_reject_unknown_field():
@@ -297,6 +335,28 @@ def test_result_rejects_non_uuid_job_id(bad_id):
 
 def test_job_accepts_supplied_valid_uuid():
     assert _minimal_job(job_id=_JOB_ID).job_id == _JOB_ID
+
+
+@pytest.mark.parametrize(
+    "job_id",
+    [
+        _JOB_ID.upper(),
+        f"urn:uuid:{_JOB_ID}",
+        f"{{{_JOB_ID}}}",
+    ],
+)
+def test_job_id_is_stored_as_canonical_uuid_string(job_id):
+    # The same logical UUID must not produce different store keys / callback ids.
+    assert _minimal_job(job_id=job_id).job_id == _JOB_ID
+    assert Result(job_id=job_id, status="ok").job_id == _JOB_ID
+
+
+@pytest.mark.parametrize("bad_id", [f" {_JOB_ID}", f"{_JOB_ID} "])
+def test_job_id_rejects_whitespace_padded_uuid(bad_id):
+    with pytest.raises(ValidationError):
+        _minimal_job(job_id=bad_id)
+    with pytest.raises(ValidationError):
+        Result(job_id=bad_id, status="ok")
 
 
 @pytest.mark.parametrize("bad_max_tokens", [0, -1, -100])
