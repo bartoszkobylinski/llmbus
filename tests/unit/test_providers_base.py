@@ -122,6 +122,29 @@ def test_provider_result_usage_cannot_be_repriced_after_construction():
         result.usage.cost_usd = 0.02
 
 
+def test_provider_result_original_usage_reference_cannot_be_repriced_after_construction():
+    usage = Usage(input_tokens=1, output_tokens=1)
+    result = ProviderResult(completion="hi", usage=usage)
+
+    with pytest.raises(ValidationError):
+        usage.cost_usd = 0.02
+
+    assert result.usage.cost_usd == 0.0
+
+
+@pytest.mark.parametrize("cost_usd", [0, 0.0, -0.0])
+def test_provider_result_accepts_exact_zero_cost(cost_usd):
+    assert (
+        ProviderResult(completion="hi", usage=Usage(cost_usd=cost_usd)).usage.cost_usd == cost_usd
+    )
+
+
+@pytest.mark.parametrize("cost_usd", [0.01, -0.01])
+def test_provider_result_rejects_any_non_zero_cost(cost_usd):
+    with pytest.raises(ValueError):
+        ProviderResult(completion="hi", usage=Usage(cost_usd=cost_usd))
+
+
 def test_provider_result_is_frozen():
     result = ProviderResult(completion="hi", usage=Usage())
     with pytest.raises(Exception):  # noqa: B017 - FrozenInstanceError is dataclass-internal
