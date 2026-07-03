@@ -67,4 +67,4 @@ show_missing = true
 # NOTE: schema.py is declarative Pydantic (few mutable statements); real
 # mutation value arrives with cost.py / ratelimit.py.
 [tool.mutmut]
-source_paths = ["src/llmbus/schema.py"]
+source_paths = ["src/llmbus/schema.py", "src/llmbus/cost.py"]

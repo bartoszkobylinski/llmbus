@@ -56,7 +56,7 @@ Kroki:
   "job_id": "uuid",
   "project": "hate-moderator",
   "kind": "classify|summarize|…",
-  "model": "gpt-4o-mini | claude-…",
+  "model": "gpt-5-mini | claude-…",
   "messages": [{"role": "user", "content": "…"}],
   "params": {"temperature": 0, "max_tokens": 512, "response_format": "…"},
   "callback_url": "http://…/internal/classified",   // albo null → poll
@@ -176,5 +176,5 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
 3. Dystrybucja klienta `llmbus` do innych repo (editable / path / pip prywatny)?
 4. Results: `store + callback` wystarczy, czy chcesz też topic `llm-results`?
 5. ~~Iggy server: docker lokalnie → potem VPS?~~ **ROZSTRZYGNIĘTE (sekcja 9b):** prod = binarka pod systemd na VPS (port 8090 localhost, nginx poza ścieżką); dev = osobny lokalny Iggy (Docker na macu), nie łączymy się do prod. Jeden serwer na VPS dla wszystkich projektów.
-6. Model klasyfikacji dla hate-mod: który OpenAI/Anthropic?
+6. Model klasyfikacji dla hate-mod: który z rodziny GPT-5 (gpt-5-mini/nano) lub Anthropic? (OpenAI = GPT-5, nie 4o.)
 7. Sync (poll `await_result`) vs async (callback) — czy oba wspieramy w v1, czy tylko callback?
