@@ -96,6 +96,22 @@ def test_provider_result_allows_explicit_usage_but_providers_should_not_price():
     assert result.usage.model_dump(by_alias=True) == {"in": 1, "out": 1, "cost_usd": 0.0}
 
 
+def test_provider_result_rejects_priced_usage():
+    # Providers report tokens only; cost.py is the sole pricing authority (§6),
+    # so a non-zero cost_usd reaching a ProviderResult is a contract violation.
+    # Assert the full message (not a substring): the developer-facing guidance is
+    # part of the contract, and an exact check also closes the mutation gate.
+    with pytest.raises(ValueError) as exc_info:
+        ProviderResult(
+            completion="hi",
+            usage=Usage(input_tokens=1, output_tokens=1, cost_usd=0.01),
+        )
+    assert str(exc_info.value) == (
+        "providers must not price a result; leave usage.cost_usd at its "
+        "0.0 default (cost.py fills it, §6), got 0.01"
+    )
+
+
 def test_provider_result_is_frozen():
     result = ProviderResult(completion="hi", usage=Usage())
     with pytest.raises(Exception):  # noqa: B017 - FrozenInstanceError is dataclass-internal

@@ -93,6 +93,8 @@ Kroki:
 ## 7. Abstrakcja providera
 Interfejs `call(model, messages, params) -> {completion, usage}`; implementacje `openai.py`, `anthropic.py`. Mapowanie `model → provider`, normalizacja usage/kosztu do wspólnego formatu. Miejsce na trzeciego (OpenRouter) później.
 
+**Kontrakt „provider nie wycenia":** `ProviderResult.usage.cost_usd` musi zostać `0.0` — provider raportuje wyłącznie tokeny, a `cost.py` jest jedynym źródłem ceny (tabela datowana, §6, bez cen z sieci). `ProviderResult` **odrzuca** (`ValueError`) usage z niezerowym `cost_usd` — fail-loud, jak reszta kontraktu (§4). Dzięki temu cena zgłoszona przez API providera (np. przyszły OpenRouter, który zwraca koszt) nie przecieka i nie przesłania ceny liczonej lokalnie po stawce z dnia `submitted_at`.
+
 ## 8. Integracja hate-moderator (pilot) — co się zmienia
 - **Zostaje w hate-mod:** webhook (HMAC), dedup po `comment_id`, decyzja policy, `hide_comment`, zapis do DB, (semafor/cap — do decyzji czy przenieść do busa).
 - **Wychodzi do busa:** samo wywołanie OpenAI (moderation + classify).

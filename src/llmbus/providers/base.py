@@ -45,16 +45,38 @@ def provider_for(model: str) -> str:
         raise UnknownModelError(model) from None
 
 
+def _reject_priced_usage(usage: Usage) -> None:
+    """Enforce the "providers never price" contract (§6/§7).
+
+    Providers report tokens only; `cost.py` is the sole pricing authority (dated
+    table). A non-zero `cost_usd` reaching a `ProviderResult` is a contract
+    violation, not data we'd trust, so reject it loudly rather than let it shadow
+    the real computed cost downstream. Kept a module-level function (not inlined
+    in `__post_init__`) so the mutation gate reaches it — mutmut does not mutate
+    methods of `@dataclass` classes (same reason `ratelimit._require_non_negative`
+    is extracted).
+    """
+    if usage.cost_usd != 0.0:
+        raise ValueError(
+            "providers must not price a result; leave usage.cost_usd at its "
+            f"0.0 default (cost.py fills it, §6), got {usage.cost_usd!r}"
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class ProviderResult:
     """A provider's raw output for one call: the completion text and token usage.
 
-    `usage.cost_usd` is left at its 0.0 default — cost is applied downstream from
-    `cost.py`, so providers stay unaware of pricing (§7).
+    `usage.cost_usd` must stay at its 0.0 default — providers report tokens only;
+    `cost.py` prices downstream (§6). A non-zero cost is rejected in
+    `__post_init__` via `_reject_priced_usage`.
     """
 
     completion: str
     usage: Usage
+
+    def __post_init__(self) -> None:
+        _reject_priced_usage(self.usage)
 
 
 @runtime_checkable
