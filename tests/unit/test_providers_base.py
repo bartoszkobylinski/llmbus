@@ -41,10 +41,34 @@ def test_provider_for_unknown_model_raises():
         provider_for("gpt-4o-mini")
 
 
+def test_provider_for_unknown_model_error_is_key_error():
+    assert issubclass(UnknownModelError, KeyError)
+
+
+def test_provider_for_unknown_model_error_names_the_model():
+    with pytest.raises(UnknownModelError) as exc_info:
+        provider_for("gpt-5-pro")
+
+    assert exc_info.value.args == ("gpt-5-pro",)
+
+
+def test_provider_for_is_case_sensitive_and_does_not_guess_provider():
+    with pytest.raises(UnknownModelError):
+        provider_for("GPT-5")
+    with pytest.raises(UnknownModelError):
+        provider_for("claude")
+
+
 def test_routing_covers_exactly_the_priced_models():
     # Single source of truth: every priced model must have a route and every
     # routed model must have a price — neither table may drift ahead of the other.
     assert set(PROVIDERS) == set(PRICING)
+
+
+def test_every_priced_model_has_a_non_empty_string_route():
+    for model in PRICING:
+        assert isinstance(PROVIDERS[model], str)
+        assert PROVIDERS[model]
 
 
 def test_every_route_names_a_known_provider():
@@ -65,6 +89,11 @@ def test_provider_result_defaults_cost_to_zero_pending_pricing():
     # Providers don't price; cost_usd stays 0.0 until cost.py fills it downstream.
     result = ProviderResult(completion="hi", usage=Usage(input_tokens=1, output_tokens=1))
     assert result.usage.cost_usd == 0.0
+
+
+def test_provider_result_allows_explicit_usage_but_providers_should_not_price():
+    result = ProviderResult(completion="hi", usage=Usage(input_tokens=1, output_tokens=1))
+    assert result.usage.model_dump(by_alias=True) == {"in": 1, "out": 1, "cost_usd": 0.0}
 
 
 def test_provider_result_is_frozen():
@@ -92,6 +121,18 @@ def test_adapter_missing_call_is_not_a_provider():
         name = "openai"
 
     assert not isinstance(_NoCall(), Provider)
+
+
+def test_runtime_protocol_check_is_structural_not_semantic():
+    class _SyncCallWrongNameType:
+        name = 123
+
+        def call(self, model, messages, params):
+            return "not a ProviderResult"
+
+    # runtime_checkable Protocol only checks that attributes exist. Static typing
+    # and adapter tests must enforce async call semantics and result shape.
+    assert isinstance(_SyncCallWrongNameType(), Provider)
 
 
 async def test_conforming_adapter_returns_a_provider_result():
