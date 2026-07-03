@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictStr
 
 
 def _new_job_id() -> str:
@@ -37,8 +37,9 @@ def _ensure_uuid(value: str) -> str:
 
 
 # job_id stays a `str` (clean as a SQLite key / URL / dict key) but must parse as
-# a UUID — see ARCHITECTURE.md §4/§6.
-JobId = Annotated[str, AfterValidator(_ensure_uuid)]
+# a UUID — see ARCHITECTURE.md §4/§6. StrictStr so lax bytes→str coercion can't
+# smuggle a non-string id past the UUID check.
+JobId = Annotated[StrictStr, AfterValidator(_ensure_uuid)]
 
 
 class Message(BaseModel):

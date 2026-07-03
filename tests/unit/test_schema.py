@@ -29,7 +29,9 @@ def _minimal_job(**overrides):
 
 
 def test_job_generates_uuid_job_id():
-    uuid.UUID(_minimal_job().job_id)  # raises if not a valid uuid
+    job_id = _minimal_job().job_id
+    uuid.UUID(job_id)  # raises if not a valid uuid
+    assert str(uuid.UUID(job_id)) == job_id
 
 
 def test_job_ids_are_unique():
@@ -81,11 +83,17 @@ def test_job_round_trips_through_dict():
 
 def test_job_round_trips_through_wire_json_with_submitted_at():
     submitted_at = datetime(2026, 7, 3, 12, 34, 56, tzinfo=timezone.utc)
-    job = _minimal_job(submitted_at=submitted_at, callback_url=None)
+    job = _minimal_job(
+        job_id=f"urn:uuid:{_JOB_ID}",
+        submitted_at=submitted_at,
+        callback_url=None,
+    )
 
     wire_json = job.model_dump_json(by_alias=True)
     wire = json.loads(wire_json)
 
+    assert job.job_id == _JOB_ID
+    assert wire["job_id"] == _JOB_ID
     assert wire["submitted_at"] == "2026-07-03T12:34:56Z"
     assert wire["params"] == {
         "temperature": 0.0,
@@ -227,7 +235,7 @@ def test_result_error_carries_message_and_meta():
 
 def test_result_round_trips_through_callback_wire_json_with_usage_aliases():
     result = Result(
-        job_id=_JOB_ID,
+        job_id=f"{{{_JOB_ID.upper()}}}",
         status="ok",
         completion="done",
         usage=Usage(input_tokens=10, output_tokens=20, cost_usd=0.003),
@@ -238,6 +246,7 @@ def test_result_round_trips_through_callback_wire_json_with_usage_aliases():
     wire_json = result.model_dump_json(by_alias=True)
     wire = json.loads(wire_json)
 
+    assert result.job_id == _JOB_ID
     assert wire == {
         "job_id": _JOB_ID,
         "status": "ok",
@@ -343,6 +352,8 @@ def test_job_accepts_supplied_valid_uuid():
         _JOB_ID.upper(),
         f"urn:uuid:{_JOB_ID}",
         f"{{{_JOB_ID}}}",
+        f"{{{_JOB_ID.upper()}}}",
+        _JOB_ID.replace("-", ""),
     ],
 )
 def test_job_id_is_stored_as_canonical_uuid_string(job_id):
@@ -351,8 +362,32 @@ def test_job_id_is_stored_as_canonical_uuid_string(job_id):
     assert Result(job_id=job_id, status="ok").job_id == _JOB_ID
 
 
+def test_job_id_normalizes_to_same_store_key_from_json_payloads():
+    payload = _minimal_job(job_id=_JOB_ID.upper()).model_dump_json()
+    assert Job.model_validate_json(payload).job_id == _JOB_ID
+
+    result_payload = Result(job_id=f"urn:uuid:{_JOB_ID}", status="ok").model_dump_json()
+    assert Result.model_validate_json(result_payload).job_id == _JOB_ID
+
+
 @pytest.mark.parametrize("bad_id", [f" {_JOB_ID}", f"{_JOB_ID} "])
 def test_job_id_rejects_whitespace_padded_uuid(bad_id):
+    with pytest.raises(ValidationError):
+        _minimal_job(job_id=bad_id)
+    with pytest.raises(ValidationError):
+        Result(job_id=bad_id, status="ok")
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        uuid.UUID(_JOB_ID),
+        _JOB_ID.encode(),
+        123,
+        None,
+    ],
+)
+def test_job_id_rejects_non_string_inputs(bad_id):
     with pytest.raises(ValidationError):
         _minimal_job(job_id=bad_id)
     with pytest.raises(ValidationError):
