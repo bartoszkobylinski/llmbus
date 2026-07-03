@@ -370,6 +370,20 @@ def test_job_id_normalizes_to_same_store_key_from_json_payloads():
     assert Result.model_validate_json(result_payload).job_id == _JOB_ID
 
 
+def test_job_id_normalizes_to_same_store_key_from_model_validate_payloads():
+    job_payload = {
+        "job_id": _JOB_ID.replace("-", ""),
+        "project": "hate-moderator",
+        "kind": "classify",
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    assert Job.model_validate(job_payload).job_id == _JOB_ID
+
+    result_payload = {"job_id": f"{{{_JOB_ID.upper()}}}", "status": "ok"}
+    assert Result.model_validate(result_payload).job_id == _JOB_ID
+
+
 @pytest.mark.parametrize("bad_id", [f" {_JOB_ID}", f"{_JOB_ID} "])
 def test_job_id_rejects_whitespace_padded_uuid(bad_id):
     with pytest.raises(ValidationError):
@@ -383,6 +397,7 @@ def test_job_id_rejects_whitespace_padded_uuid(bad_id):
     [
         uuid.UUID(_JOB_ID),
         _JOB_ID.encode(),
+        bytearray(_JOB_ID.encode()),
         123,
         None,
     ],
@@ -392,6 +407,36 @@ def test_job_id_rejects_non_string_inputs(bad_id):
         _minimal_job(job_id=bad_id)
     with pytest.raises(ValidationError):
         Result(job_id=bad_id, status="ok")
+
+
+@pytest.mark.parametrize("bad_id", [_JOB_ID.encode(), 123, None])
+def test_job_id_rejects_non_string_inputs_from_model_validate(bad_id):
+    job_payload = {
+        "job_id": bad_id,
+        "project": "hate-moderator",
+        "kind": "classify",
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    with pytest.raises(ValidationError):
+        Job.model_validate(job_payload)
+    with pytest.raises(ValidationError):
+        Result.model_validate({"job_id": bad_id, "status": "ok"})
+
+
+@pytest.mark.parametrize("bad_id", [123, None])
+def test_job_id_rejects_non_string_inputs_from_json_payloads(bad_id):
+    job_payload = {
+        "job_id": bad_id,
+        "project": "hate-moderator",
+        "kind": "classify",
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    with pytest.raises(ValidationError):
+        Job.model_validate_json(json.dumps(job_payload))
+    with pytest.raises(ValidationError):
+        Result.model_validate_json(json.dumps({"job_id": bad_id, "status": "ok"}))
 
 
 @pytest.mark.parametrize("bad_max_tokens", [0, -1, -100])
