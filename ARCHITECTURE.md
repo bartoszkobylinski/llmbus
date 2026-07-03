@@ -86,7 +86,7 @@ Kroki:
 - **rate-limit:** token-bucket per provider (OpenAI i Anthropic osobno; req/min + tok/min). Globalny — to jest cała idea busa.
 - **retry/backoff:** na 429/5xx/timeout z jitter; po M próbach → dead-letter (v1: zapis błędu do store + log; osobny topic dead-letter w v2).
 - **provider routing:** po nazwie `model` → OpenAI albo Anthropic.
-- **koszt:** z usage, per `project` → tabela kosztów (podstawa budżetu).
+- **koszt:** z usage, per `project` → tabela kosztów (podstawa budżetu). Cennik jest **datowany** (`cost.py`: każdy model ma historię cen z datą wejścia w życie) — koszt liczony po stawce obowiązującej w dniu `submitted_at`, więc zaplanowane zmiany (np. koniec ceny promo Sonnet 5 dnia 2026-09-01) rozwiązują się same, bez ręcznej edycji i bez pobierania cen z sieci.
 - **timeout** per job.
 - **idempotencja:** przy at-least-once (worker padł po modelu, przed commitem offsetu) job wraca; `job_id` w store chroni przed podwójnym zapisem/callbackiem. hate-mod ma dodatkowo własny dedup po `comment_id`.
 
