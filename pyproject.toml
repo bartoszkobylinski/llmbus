@@ -90,4 +90,5 @@ source_paths = [
     "src/llmbus/ratelimit.py",
     "src/llmbus/providers/__init__.py",
     "src/llmbus/providers/base.py",
+    "src/llmbus/providers/openai.py",
 ]

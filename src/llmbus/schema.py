@@ -54,14 +54,16 @@ class Message(BaseModel):
 class JobParams(BaseModel):
     """Model-call parameters passed through to the provider.
 
-    `temperature` is intentionally unbounded here: valid ranges differ per
-    provider (OpenAI 0-2, Anthropic 0-1), so the per-provider adapter owns that
-    check. `max_tokens`, when set, must be positive — invalid at every provider.
+    `temperature` is **optional** (unset = let the model use its own default) and
+    unbounded here: support and valid ranges differ per model, so the per-provider
+    adapter owns that check — the GPT-5 family, for one, rejects any caller-set
+    temperature (§7, §14 #9). `max_tokens`, when set, must be positive — invalid at
+    every provider.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    temperature: float = 0.0
+    temperature: float | None = None
     max_tokens: int | None = Field(default=None, gt=0)
     response_format: str | None = None
 

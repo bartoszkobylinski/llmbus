@@ -58,7 +58,7 @@ Kroki:
   "kind": "classify|summarize|…",
   "model": "gpt-5-mini | claude-…",
   "messages": [{"role": "user", "content": "…"}],
-  "params": {"temperature": 0, "max_tokens": 512, "response_format": "…"},
+  "params": {"temperature": null, "max_tokens": 512, "response_format": "…"},  // temperature opcjonalne
   "callback_url": "http://…/internal/classified",   // albo null → poll
   "meta": {"comment_id": "…"},                        // wraca nietknięte
   "submitted_at": "…"
@@ -73,7 +73,7 @@ Kroki:
 **Walidacja (v1, ścisła — Pydantic):**
 - **`extra="forbid"`** na wszystkich modelach kontraktu — nieznane pole (np. literówka `callback` zamiast `callback_url`) = błąd od razu, nie ciche zgubienie. `meta` zostaje dowolnym słownikiem, więc elastyczność nie ucierpia.
 - **`job_id` musi być poprawnym UUID** (generowany jako `uuid4`), **normalizowany do postaci kanonicznej** (lowercase, z myślnikami) — to klucz w store i podstawa idempotencji/dedupu (§6). Warianty tego samego UUID (uppercase, `urn:uuid:…`, `{…}`) sprowadzamy do jednego klucza; pusty/„prosty"/z białymi znakami id jest odrzucany. Akceptujemy wyłącznie wejście typu `str` — `bytes`/inne typy odrzucane (`StrictStr`), żeby leniwa koercja nie przemyciła nie-stringa.
-- **`max_tokens` > 0** jeśli podane (nieprawidłowe u każdego providera). **`temperature` bez ograniczeń w kontrakcie** — zakresy różnią się per provider (OpenAI 0–2, Anthropic 0–1), więc waliduje/normalizuje je adapter providera (§7).
+- **`max_tokens` > 0** jeśli podane (nieprawidłowe u każdego providera). **`temperature` jest opcjonalne** (`null`/nieustawione = model używa swojej domyślnej) i nieograniczone w kontrakcie — obsługa i zakresy różnią się per model, więc waliduje je adapter providera (§7). Rodzina GPT-5 **odrzuca jakiekolwiek ustawione `temperature`** (§14 #9): adapter OpenAI zgłasza wtedy błąd **przed** wywołaniem API, zamiast cicho je gubić.
 
 **Uwaga o nagłówkach Iggy:** metadane (`project`, `model`, `priority`) logicznie należą do **nagłówków wiadomości**, ale Python SDK ich nie ma → w v1 wszystko idzie w body JSON. To jest dokładnie miejsce na ewentualną rozbudowę SDK (nagłówki).
 
@@ -92,6 +92,8 @@ Kroki:
 
 ## 7. Abstrakcja providera
 Interfejs `call(model, messages, params) -> {completion, usage}`; implementacje `openai.py`, `anthropic.py`. Mapowanie `model → provider`, normalizacja usage/kosztu do wspólnego formatu. Miejsce na trzeciego (OpenRouter) później.
+
+**Adapter OpenAI (`openai.py`, rodzina GPT-5).** Klient SDK jest **wstrzykiwany** (`config.py` buduje prawdziwy `AsyncOpenAI`; testy podają atrapę) — moduł nie importuje SDK i pozostaje czystą logiką (w bramce mutacyjnej). Mapowanie per-model wg realiów SDK (zweryfikowane, §14 #9): `max_tokens → max_completion_tokens`; `temperature` **odrzucane** gdy job je ustawi (GPT-5 honoruje tylko swoją domyślną — fail-loud przed wywołaniem API); `completion_tokens` (zawiera reasoning tokens) → `output_tokens`. Adapter Anthropic dopisze się analogicznie (temperatura 0–1 wspierana).
 
 **Kontrakt „provider nie wycenia":** `ProviderResult.usage.cost_usd` musi zostać `0.0` — provider raportuje wyłącznie tokeny, a `cost.py` jest jedynym źródłem ceny (tabela datowana, §6, bez cen z sieci). `ProviderResult` **odrzuca** (`ValueError`) usage z niezerowym `cost_usd` — fail-loud, jak reszta kontraktu (§4). Dzięki temu cena zgłoszona przez API providera (np. przyszły OpenRouter, który zwraca koszt) nie przecieka i nie przesłania ceny liczonej lokalnie po stawce z dnia `submitted_at`. `Usage` jest przy tym **immutable** (`frozen=True`), więc `cost_usd` nie da się podmienić po konstrukcji — gwarancja jest strukturalna, nie tylko w chwili tworzenia (wycena downstream buduje **nowy** `Usage`, nie mutuje istniejącego).
 
@@ -189,19 +191,14 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    `dict[str, Provider]`), by mypy je weryfikował, i mieć własne testy `await`/assert.
    Pakiet dostaje znacznik PEP 561 `py.typed` — repo importujące `llmbus` też korzysta z
    typów (wsad do decyzji **#3** o dystrybucji klienta).
-9. **GPT-5 a `params` (§4) — polityka `temperature`.** Zweryfikowane w SDK (lipiec 2026):
-   cała rodzina GPT-5 (gpt-5/mini/nano) przez Chat Completions **odrzuca `temperature` inne
-   niż domyślne (1)** — 400 „Unsupported value: 'temperature'… Only the default (1) value is
-   supported" — i wymaga **`max_completion_tokens`, nie `max_tokens`**. Kłóci się to z §4
-   (przykład `"temperature": 0`) i §7 („OpenAI 0–2"). `max_tokens` → `max_completion_tokens`
-   to czyste mapowanie w adapterze (bez decyzji). Do rozstrzygnięcia — **polityka
-   temperatury**, gdy job ustawia wartość, której model nie honoruje:
-   - (A, rekomendacja) **waliduj i odrzuć wcześnie**: `JobParams.temperature` opcjonalne
-     (`None` domyślnie, nie `0`); jawnie ustawiona nieobsługiwana wartość → błąd przed
-     wywołaniem API (fail-loud, jak §4). Wymaga aktualizacji §4 (temperature opcjonalne)
-     i §7 (obsługa temperatury per-model).
-   - (B) **cicho pomiń dla GPT-5**: adapter nie wysyła temperatury; wbrew fail-loud
-     (`temperature=0` znika bez ostrzeżenia).
-   - (C) **przepuść i pozwól na 400**: najprościej, ale błąd po zakolejkowaniu, nieczytelny.
-   Blokuje `feat/provider-adapters` (adapter OpenAI). Reasoning tokens GPT-5 rozliczane jako
-   output → `completion_tokens` → `output_tokens` (do weryfikacji przy implementacji).
+9. ~~**GPT-5 a `params` (§4) — polityka `temperature`.**~~ **ROZSTRZYGNIĘTE — wariant A
+   (waliduj i odrzuć wcześnie).** Zweryfikowane w SDK (lipiec 2026): cała rodzina GPT-5
+   (gpt-5/mini/nano) przez Chat Completions **odrzuca `temperature` inne niż domyślne (1)**
+   — 400 „Unsupported value: 'temperature'… Only the default (1) value is supported" — i
+   wymaga **`max_completion_tokens`, nie `max_tokens`**. Wdrożone: `JobParams.temperature`
+   jest opcjonalne (`None` domyślnie, nie `0`, §4); adapter OpenAI **odrzuca (`ValueError`)
+   jakiekolwiek ustawione `temperature`** dla GPT-5 **przed** wywołaniem API (fail-loud, jak
+   reszta §4), zamiast cicho gubić wartość (B) lub czekać na 400 po zakolejkowaniu (C).
+   `max_tokens → max_completion_tokens` to mapowanie w adapterze; reasoning tokens GPT-5
+   wchodzą w `completion_tokens` → `output_tokens`, więc wyceniają się poprawnie (§6). §4/§7
+   zaktualizowane w tym samym PR.

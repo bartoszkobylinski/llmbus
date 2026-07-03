@@ -66,7 +66,7 @@ def test_job_params_concrete_defaults():
     # Assert concrete values, not just equality to JobParams(), so a mutated
     # default can't hide behind both sides mutating together.
     params = JobParams()
-    assert params.temperature == 0.0
+    assert params.temperature is None
     assert params.max_tokens is None
     assert params.response_format is None
 
@@ -96,7 +96,7 @@ def test_job_round_trips_through_wire_json_with_submitted_at():
     assert wire["job_id"] == _JOB_ID
     assert wire["submitted_at"] == "2026-07-03T12:34:56Z"
     assert wire["params"] == {
-        "temperature": 0.0,
+        "temperature": None,
         "max_tokens": None,
         "response_format": None,
     }
