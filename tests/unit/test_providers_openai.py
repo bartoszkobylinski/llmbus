@@ -66,6 +66,20 @@ def test_request_includes_response_format_when_set():
     assert request["response_format"] == "json_object"
 
 
+def test_request_combines_supported_openai_kwargs_without_temperature():
+    request = _openai_request(
+        "gpt-5-mini",
+        _MESSAGES,
+        JobParams(max_tokens=128, response_format="json_object"),
+    )
+    assert request == {
+        "model": "gpt-5-mini",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_completion_tokens": 128,
+        "response_format": "json_object",
+    }
+
+
 def test_request_omits_response_format_when_unset():
     assert "response_format" not in _openai_request("gpt-5", _MESSAGES, JobParams())
 
@@ -84,11 +98,21 @@ def test_request_rejects_any_caller_set_temperature(temperature):
     )
 
 
+@pytest.mark.parametrize("model", ["gpt-5", "gpt-5-mini", "gpt-5-nano"])
+def test_request_rejects_temperature_for_entire_gpt5_family(model):
+    with pytest.raises(ValueError, match=f"model {model!r} does not support"):
+        _openai_request(model, _MESSAGES, JobParams(temperature=1.0))
+
+
 # --- response extraction -----------------------------------------------------
 
 
 def test_completion_from_response_returns_content():
     assert _completion_from_response(_response(content="hello")) == "hello"
+
+
+def test_completion_from_response_allows_empty_string_content():
+    assert _completion_from_response(_response(content="")) == ""
 
 
 def test_completion_from_response_rejects_missing_content():
@@ -101,6 +125,14 @@ def test_usage_from_openai_maps_tokens_and_leaves_cost_zero():
     usage = _usage_from_openai(SimpleNamespace(prompt_tokens=7, completion_tokens=11))
     assert usage == Usage(input_tokens=7, output_tokens=11)
     assert usage.cost_usd == 0.0
+
+
+def test_usage_from_openai_ignores_total_tokens_and_uses_prompt_completion_split():
+    usage = _usage_from_openai(
+        SimpleNamespace(prompt_tokens=7, completion_tokens=11, total_tokens=999)
+    )
+    assert usage.input_tokens == 7
+    assert usage.output_tokens == 11
 
 
 # --- adapter -----------------------------------------------------------------
@@ -126,6 +158,24 @@ async def test_call_builds_request_and_returns_provider_result():
         max_completion_tokens=64,
     )
     assert result == ProviderResult(completion="done", usage=Usage(input_tokens=3, output_tokens=5))
+
+
+async def test_call_forwards_all_supported_request_kwargs():
+    client = _client(_response(content="done", prompt_tokens=3, completion_tokens=5))
+    adapter = OpenAIAdapter(client)
+
+    await adapter.call(
+        "gpt-5-nano",
+        _MESSAGES,
+        JobParams(max_tokens=64, response_format="json_object"),
+    )
+
+    client.chat.completions.create.assert_awaited_once_with(
+        model="gpt-5-nano",
+        messages=[{"role": "user", "content": "hi"}],
+        max_completion_tokens=64,
+        response_format="json_object",
+    )
 
 
 async def test_call_rejects_temperature_before_touching_the_client():

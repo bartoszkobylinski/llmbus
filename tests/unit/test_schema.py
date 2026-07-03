@@ -71,6 +71,12 @@ def test_job_params_concrete_defaults():
     assert params.response_format is None
 
 
+def test_job_params_accepts_temperature_for_provider_specific_validation():
+    # The schema stays provider-neutral; GPT-5 rejection happens in the OpenAI
+    # adapter, while future/other providers may allow their own ranges.
+    assert JobParams(temperature=1.0).temperature == 1.0
+
+
 def test_job_requires_core_fields():
     with pytest.raises(ValidationError):
         Job(kind="classify", model="x", messages=[])  # missing `project`
