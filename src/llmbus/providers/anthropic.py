@@ -69,11 +69,6 @@ def _anthropic_request(
         raise ValueError(
             f"Anthropic requires max_tokens; set params.max_tokens for model {model!r}"
         )
-    if params.response_format is not None:
-        raise ValueError(
-            "the Anthropic adapter does not support response_format in v1 "
-            "(Anthropic uses output_config.format, not a bare string); leave it unset"
-        )
     system, chat = _anthropic_system_and_messages(messages)
     request: dict[str, Any] = {"model": model, "max_tokens": params.max_tokens, "messages": chat}
     if system is not None:

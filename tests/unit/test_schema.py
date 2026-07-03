@@ -68,7 +68,6 @@ def test_job_params_concrete_defaults():
     params = JobParams()
     assert params.temperature is None
     assert params.max_tokens is None
-    assert params.response_format is None
 
 
 def test_job_params_accepts_temperature_for_provider_specific_validation():
@@ -104,7 +103,6 @@ def test_job_round_trips_through_wire_json_with_submitted_at():
     assert wire["params"] == {
         "temperature": None,
         "max_tokens": None,
-        "response_format": None,
     }
     assert Job.model_validate_json(wire_json) == job
 

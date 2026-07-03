@@ -59,13 +59,17 @@ class JobParams(BaseModel):
     adapter owns that check — the GPT-5 family, for one, rejects any caller-set
     temperature (§7, §14 #9). `max_tokens`, when set, must be positive — invalid at
     every provider.
+
+    Structured output (`response_format`) is deliberately **not** in the v1
+    contract (§14 #10): a bare string maps cleanly to no provider — OpenAI wants an
+    object, Anthropic uses `output_config.format` — so it is deferred to v2 rather
+    than shipped as a field that means something different per adapter.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     temperature: float | None = None
     max_tokens: int | None = Field(default=None, gt=0)
-    response_format: str | None = None
 
 
 class Job(BaseModel):

@@ -58,7 +58,7 @@ Kroki:
   "kind": "classify|summarize|…",
   "model": "gpt-5-mini | claude-…",
   "messages": [{"role": "user", "content": "…"}],
-  "params": {"temperature": null, "max_tokens": 512, "response_format": "…"},  // temperature opcjonalne
+  "params": {"temperature": null, "max_tokens": 512},  // temperature opcjonalne; structured output poza v1 (§14 #10)
   "callback_url": "http://…/internal/classified",   // albo null → poll
   "meta": {"comment_id": "…"},                        // wraca nietknięte
   "submitted_at": "…"
@@ -74,6 +74,7 @@ Kroki:
 - **`extra="forbid"`** na wszystkich modelach kontraktu — nieznane pole (np. literówka `callback` zamiast `callback_url`) = błąd od razu, nie ciche zgubienie. `meta` zostaje dowolnym słownikiem, więc elastyczność nie ucierpia.
 - **`job_id` musi być poprawnym UUID** (generowany jako `uuid4`), **normalizowany do postaci kanonicznej** (lowercase, z myślnikami) — to klucz w store i podstawa idempotencji/dedupu (§6). Warianty tego samego UUID (uppercase, `urn:uuid:…`, `{…}`) sprowadzamy do jednego klucza; pusty/„prosty"/z białymi znakami id jest odrzucany. Akceptujemy wyłącznie wejście typu `str` — `bytes`/inne typy odrzucane (`StrictStr`), żeby leniwa koercja nie przemyciła nie-stringa.
 - **`max_tokens` > 0** jeśli podane (nieprawidłowe u każdego providera). **`temperature` jest opcjonalne** (`null`/nieustawione = model używa swojej domyślnej) i nieograniczone w kontrakcie — obsługa i zakresy różnią się per model, więc waliduje je adapter providera (§7). Rodzina GPT-5 **odrzuca jakiekolwiek ustawione `temperature`** (§14 #9): adapter OpenAI zgłasza wtedy błąd **przed** wywołaniem API, zamiast cicho je gubić.
+- **`response_format` (structured output) NIE jest w kontrakcie v1** (§14 #10): goły `str` nie mapuje się czysto na żadnego providera — OpenAI chce obiektu, Anthropic używa `output_config.format` — więc pole, które znaczyłoby co innego per adapter, jest **odłożone do v2** zamiast udawać neutralność.
 
 **Uwaga o nagłówkach Iggy:** metadane (`project`, `model`, `priority`) logicznie należą do **nagłówków wiadomości**, ale Python SDK ich nie ma → w v1 wszystko idzie w body JSON. To jest dokładnie miejsce na ewentualną rozbudowę SDK (nagłówki).
 
@@ -204,3 +205,13 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    `max_tokens → max_completion_tokens` to mapowanie w adapterze; reasoning tokens GPT-5
    wchodzą w `completion_tokens` → `output_tokens`, więc wyceniają się poprawnie (§6). §4/§7
    zaktualizowane w tym samym PR.
+10. ~~**`response_format` (structured output) w kontrakcie §4.**~~ **ROZSTRZYGNIĘTE —
+   usuń z v1, odłóż do v2.** Goły `str` (jak w pierwotnym §4) nie mapuje się czysto na
+   żadnego providera: OpenAI oczekuje **obiektu** `response_format`, Anthropic używa
+   **`output_config.format`**. Utrzymanie pola zmuszało adaptery do rozjazdu (OpenAI
+   forwardował surowy string, Anthropic go odrzucał) — pole „neutralne", które znaczy co
+   innego per provider. Wybrane **A (usuń z kontraktu)** zamiast **B (zostaw, tylko-OpenAI)**
+   lub **C (przeprojektuj na typ strukturalny już teraz)** — C to scope creep wobec §1
+   (v1 mały). Wdrożone: `JobParams.response_format` usunięte; gałęzie forward/reject w obu
+   adapterach usunięte; §4 odnotowuje odłożenie. Ustrukturyzowany output wróci w v2 jako typ
+   mapujący się na realny kształt każdego providera. Decyzja podjęta w PR `config`.

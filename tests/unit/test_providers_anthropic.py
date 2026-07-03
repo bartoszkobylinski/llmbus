@@ -111,19 +111,6 @@ def test_request_includes_system_when_present():
     assert request["system"] == "be terse"
 
 
-def test_request_rejects_response_format_instead_of_silently_dropping_it():
-    with pytest.raises(ValueError) as exc_info:
-        _anthropic_request(
-            "claude-opus-4-8",
-            _USER,
-            JobParams(max_tokens=64, response_format="json_object"),
-        )
-    assert str(exc_info.value) == (
-        "the Anthropic adapter does not support response_format in v1 "
-        "(Anthropic uses output_config.format, not a bare string); leave it unset"
-    )
-
-
 # --- temperature (per-model) -------------------------------------------------
 
 
@@ -254,22 +241,4 @@ async def test_call_rejects_missing_max_tokens_before_touching_the_client():
     with pytest.raises(ValueError, match="requires max_tokens"):
         await adapter.call("claude-opus-4-8", _USER, JobParams())
 
-    client.messages.create.assert_not_awaited()
-
-
-async def test_call_rejects_response_format_before_touching_the_client():
-    client = _client(_response())
-    adapter = AnthropicAdapter(client)
-
-    with pytest.raises(ValueError) as exc_info:
-        await adapter.call(
-            "claude-opus-4-8",
-            _USER,
-            JobParams(max_tokens=64, response_format="json_object"),
-        )
-
-    assert str(exc_info.value) == (
-        "the Anthropic adapter does not support response_format in v1 "
-        "(Anthropic uses output_config.format, not a bare string); leave it unset"
-    )
     client.messages.create.assert_not_awaited()

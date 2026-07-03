@@ -36,8 +36,6 @@ def _openai_request(model: str, messages: Sequence[Message], params: JobParams) 
     request: dict[str, Any] = {"model": model, "messages": _openai_messages(messages)}
     if params.max_tokens is not None:
         request["max_completion_tokens"] = params.max_tokens
-    if params.response_format is not None:
-        request["response_format"] = params.response_format
     return request
 
 
