@@ -127,8 +127,10 @@ async def test_worker_consumes_and_finalizes_a_real_message(tmp_path):
     async with Store(str(tmp_path / "store.db")) as store:
         job = _job()
         await store.insert_pending(job)  # the submit() side inserts the pending row
+        # partition_id is 0-indexed (matches the SDK's own tests); a topic with
+        # partitions_count=1 has partition 0.
         await client.send_messages(
-            topology.stream, topology.topic, 1, [SendMessage(job.model_dump_json())]
+            topology.stream, topology.topic, 0, [SendMessage(job.model_dump_json())]
         )
 
         provider = _FakeProvider()
