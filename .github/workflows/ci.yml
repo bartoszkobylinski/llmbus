@@ -61,6 +61,11 @@ jobs:
         image: apache/iggy:0.8.0
         ports:
           - 8090:8090
+        # Bind TCP to 0.0.0.0, not Iggy's default 127.0.0.1 (container loopback) —
+        # otherwise Docker's port-forward can't reach the server. (Prod keeps
+        # 127.0.0.1 on the VPS, §9b: localhost-only, no port-forward in the way.)
+        env:
+          IGGY_TCP_ADDRESS: 0.0.0.0:8090
         options: >-
           --security-opt seccomp=unconfined
           --cap-add SYS_NICE

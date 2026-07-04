@@ -15,6 +15,14 @@ services:
       - "8090:8090"   # TCP  — the SDK talks this
       - "3000:3000"   # HTTP — health/stats
       - "8080:8080"   # QUIC
+    # Bind TCP to all interfaces, not Iggy's default 127.0.0.1 (container loopback),
+    # so the SDK on the host reaches it through the port mapping. Prod (systemd on
+    # the VPS, §9b) keeps 127.0.0.1 — localhost-only, no port-forward in the path.
+    # NOTE: apache/iggy 0.7.0+ is an io_uring server that does NOT start under Docker
+    # Desktop on macOS (VM kernel lacks io_uring). Dev on macOS: run the SDK against
+    # the CI Iggy or a Linux box; this compose is for Linux dev hosts.
+    environment:
+      IGGY_TCP_ADDRESS: 0.0.0.0:8090
     volumes:
       - iggy-data:/local_data
     restart: unless-stopped
