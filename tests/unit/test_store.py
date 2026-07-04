@@ -5,6 +5,7 @@ so it runs in the fast suite. store.py is I/O, so it is excluded from the mutmut
 gate but still owes ≥90% coverage.
 """
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -65,6 +66,12 @@ async def test_methods_require_connect(tmp_path):
     store = Store(_db(tmp_path))
     with pytest.raises(RuntimeError, match="not connected"):
         await store.get(_ABSENT_ID)
+    with pytest.raises(RuntimeError, match="not connected"):
+        await store.insert_pending(_job())
+    with pytest.raises(RuntimeError, match="not connected"):
+        await store.finalize(Result(job_id=_ABSENT_ID, status="ok"))
+    with pytest.raises(RuntimeError, match="not connected"):
+        await store.pending_count()
 
 
 async def test_close_is_safe_without_connect_and_twice(tmp_path):
@@ -105,6 +112,31 @@ async def test_insert_pending_duplicate_is_noop(tmp_path):
         assert await store.insert_pending(job) is True
         assert await store.insert_pending(job) is False
         assert await store.pending_count() == 1
+
+
+async def test_insert_pending_duplicate_does_not_overwrite_original_row(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        job_id = "550e8400-e29b-41d4-a716-446655440000"
+        original = _job(
+            job_id=job_id,
+            project="first-project",
+            model="gpt-5-mini",
+            meta={"comment_id": "first"},
+        )
+        duplicate = _job(
+            job_id=job_id,
+            project="second-project",
+            model="claude-haiku-4-5",
+            meta={"comment_id": "second"},
+        )
+
+        assert await store.insert_pending(original) is True
+        assert await store.insert_pending(duplicate) is False
+
+        stored = await store.get(job_id)
+        assert stored.project == "first-project"
+        assert stored.model == "gpt-5-mini"
+        assert stored.meta == {"comment_id": "first"}
 
 
 async def test_meta_round_trips_nested_structures(tmp_path):
@@ -175,6 +207,23 @@ async def test_finalize_is_one_shot_against_redelivery(tmp_path):
         assert stored.completion == "first"  # redelivery did not overwrite
 
 
+async def test_finalize_does_not_overwrite_insert_metadata(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        job = _job(meta={"comment_id": "original", "labels": ["needs-review"]})
+        await store.insert_pending(job)
+        result = Result(
+            job_id=job.job_id,
+            status="ok",
+            completion="done",
+            meta={"comment_id": "result-should-not-win"},
+        )
+
+        assert await store.finalize(result) is True
+
+        stored = await store.get(job.job_id)
+        assert stored.meta == {"comment_id": "original", "labels": ["needs-review"]}
+
+
 async def test_finalize_unknown_job_returns_false(tmp_path):
     async with Store(_db(tmp_path)) as store:
         assert await store.finalize(Result(job_id=_ABSENT_ID, status="ok")) is False
@@ -214,3 +263,43 @@ async def test_second_connection_sees_committed_rows(tmp_path):
         stored = await reader.get(job.job_id)
         assert stored is not None
         assert stored.status == PENDING
+
+
+async def test_second_connection_sees_finalized_row(tmp_path):
+    path = _db(tmp_path)
+    async with Store(path) as writer, Store(path) as reader:
+        job = _job()
+        await writer.insert_pending(job)
+
+        assert await reader.pending_count() == 1
+
+        await writer.finalize(Result(job_id=job.job_id, status="ok", completion="done"))
+        stored = await reader.get(job.job_id)
+
+        assert stored.status == "ok"
+        assert stored.completion == "done"
+        assert await reader.pending_count() == 0
+
+
+async def test_concurrent_finalize_attempts_on_separate_connections_are_one_shot(tmp_path):
+    path = _db(tmp_path)
+    async with Store(path) as submitter:
+        job = _job()
+        await submitter.insert_pending(job)
+
+    async with Store(path) as first, Store(path) as second:
+        first_result = Result(job_id=job.job_id, status="ok", completion="first")
+        second_result = Result(job_id=job.job_id, status="ok", completion="second")
+
+        outcomes = await asyncio.gather(
+            first.finalize(first_result),
+            second.finalize(second_result),
+        )
+
+    assert outcomes.count(True) == 1
+    assert outcomes.count(False) == 1
+
+    async with Store(path) as reader:
+        stored = await reader.get(job.job_id)
+        assert stored.completion in {"first", "second"}
+        assert await reader.pending_count() == 0
