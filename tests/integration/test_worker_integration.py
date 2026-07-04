@@ -45,19 +45,25 @@ _PASS = os.environ.get("IGGY_PASSWORD", "iggy")
 
 
 async def _connect_or_skip() -> IggyClient:
-    # Bound the connect: the Rust client retries a down broker for a long time, so
-    # without a timeout an absent Iggy would hang the suite instead of skipping.
-    client = IggyClient(_ADDR)
-    try:
-        await asyncio.wait_for(client.connect(), timeout=5)
-        await asyncio.wait_for(client.login_user(_USER, _PASS), timeout=5)
-    except (Exception, asyncio.TimeoutError) as exc:  # noqa: BLE001 - any failure ⇒ no broker
-        # Locally a missing broker is a skip; in CI (LLMBUS_REQUIRE_IGGY set) it is a
-        # failure — otherwise a broken Iggy service would fake a green integration run.
-        if os.environ.get("LLMBUS_REQUIRE_IGGY"):
-            raise
-        pytest.skip(f"local Iggy not reachable at {_ADDR}: {exc}")
-    return client
+    # Retry the full connect+login handshake: a freshly-started broker binds its TCP
+    # port before it is protocol-ready, so a cold connect gets 'Disconnected'. Each
+    # attempt is bounded (the Rust client would otherwise retry a truly-down broker
+    # for a long time) with a fresh client, since a failed one may be poisoned.
+    last_exc: BaseException | None = None
+    for _ in range(20):
+        client = IggyClient(_ADDR)
+        try:
+            await asyncio.wait_for(client.connect(), timeout=3)
+            await asyncio.wait_for(client.login_user(_USER, _PASS), timeout=3)
+            return client
+        except (Exception, asyncio.TimeoutError) as exc:  # noqa: BLE001 - retry any handshake failure
+            last_exc = exc
+            await asyncio.sleep(1)
+    # Exhausted. Locally a missing broker is a skip; in CI (LLMBUS_REQUIRE_IGGY set)
+    # it is a failure — otherwise a broken Iggy service would fake a green run.
+    if os.environ.get("LLMBUS_REQUIRE_IGGY"):
+        raise RuntimeError(f"Iggy at {_ADDR} not usable after retries: {last_exc}")
+    pytest.skip(f"local Iggy not reachable at {_ADDR}: {last_exc}")
 
 
 def _unique_topology() -> Topology:
