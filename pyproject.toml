@@ -13,6 +13,16 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
+# The LLM SDKs are worker-side only: config.build_providers() constructs the real
+# AsyncOpenAI/AsyncAnthropic clients (imported lazily). Producers that only submit
+# jobs (client.py) never need them, so they live in an extra — the worker host
+# installs `llmbus[worker]` (uv sync --extra worker), producers stay lean (§14 #3).
+[project.optional-dependencies]
+worker = [
+    "openai>=1.0",
+    "anthropic>=0.40",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -63,11 +73,20 @@ init_forbid_extra = true
 init_typed = true
 warn_required_dynamic_aliases = true
 
+# The LLM SDKs live in the optional `worker` extra, so they are absent from the
+# type-check environment; config.py imports them lazily inside the default client
+# factories. Ignore the missing imports rather than force the heavy SDKs into the
+# merge-gate mypy run — the factories are typed `-> Any` and covered by the extra.
+[[tool.mypy.overrides]]
+module = ["openai", "anthropic"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration: requires a running Iggy server (dev: docker compose up -d)",
+    "live_api: makes real billable OpenAI/Anthropic calls; needs the `worker` extra + API keys. Run explicitly: pytest -m live_api",
 ]
 
 [tool.coverage.run]
@@ -93,3 +112,7 @@ source_paths = [
     "src/llmbus/providers/openai.py",
     "src/llmbus/providers/anthropic.py",
 ]
+# config.py is integration-touching (builds the SDK clients), so it is *not*
+# mutated — same exclusion as worker/store/client. But test_config.py imports it,
+# so copy the unmodified module into the mutants sandbox or collection would fail.
+also_copy = ["src/llmbus/config.py"]
