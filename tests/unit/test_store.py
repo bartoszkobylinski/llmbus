@@ -6,7 +6,7 @@ gate but still owes ≥90% coverage.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -45,6 +45,26 @@ async def test_connect_enables_wal(tmp_path):
         assert row[0] == "wal"
 
 
+async def test_connect_sets_busy_timeout(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        cursor = await store._conn.execute("PRAGMA busy_timeout")
+        row = await cursor.fetchone()
+        assert row[0] == 5000
+
+
+async def test_connect_creates_status_index(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        cursor = await store._conn.execute(
+            """
+            SELECT name
+              FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = 'jobs'
+            """
+        )
+        rows = await cursor.fetchall()
+        assert {row["name"] for row in rows} >= {"sqlite_autoindex_jobs_1", "idx_jobs_status"}
+
+
 async def test_reconnecting_to_existing_store_is_safe(tmp_path):
     path = _db(tmp_path)
     async with Store(path) as first:
@@ -60,6 +80,15 @@ async def test_in_memory_store_skips_directory_creation():
         job = _job()
         assert await store.insert_pending(job) is True
         assert await store.get(job.job_id) is not None
+
+
+async def test_in_memory_store_instances_are_isolated():
+    async with Store(":memory:") as first, Store(":memory:") as second:
+        job = _job()
+        await first.insert_pending(job)
+
+        assert await first.get(job.job_id) is not None
+        assert await second.get(job.job_id) is None
 
 
 async def test_methods_require_connect(tmp_path):
@@ -80,6 +109,24 @@ async def test_close_is_safe_without_connect_and_twice(tmp_path):
     await store.connect()
     await store.close()
     await store.close()  # double close
+
+
+async def test_store_can_be_reused_after_close_and_reconnect(tmp_path):
+    store = Store(_db(tmp_path))
+    job = _job()
+
+    await store.connect()
+    await store.insert_pending(job)
+    await store.close()
+
+    with pytest.raises(RuntimeError, match="not connected"):
+        await store.get(job.job_id)
+
+    await store.connect()
+    try:
+        assert await store.get(job.job_id) is not None
+    finally:
+        await store.close()
 
 
 # --- insert_pending ----------------------------------------------------------
@@ -148,6 +195,60 @@ async def test_meta_round_trips_nested_structures(tmp_path):
         assert stored.meta == meta
 
 
+async def test_unicode_large_completion_and_column_like_meta_keys_round_trip(tmp_path):
+    meta = {
+        "job_id": "meta-not-column",
+        "status": "meta-status",
+        "emoji": "zażółć 🚀",
+        "nested": {"completion": "not row completion"},
+    }
+    completion = "done ✅\n" + ("x" * 100_000)
+
+    async with Store(_db(tmp_path)) as store:
+        job = _job(meta=meta)
+        await store.insert_pending(job)
+        result = Result(
+            job_id=job.job_id,
+            status="ok",
+            completion=completion,
+            usage=Usage(
+                input_tokens=2**40,
+                output_tokens=2**40 + 1,
+                cost_usd=123456.789012,
+            ),
+            provider="anthropic",
+        )
+        await store.finalize(result)
+
+        stored = await store.get(job.job_id)
+        assert stored.meta == meta
+        assert stored.completion == completion
+        assert stored.usage == Usage(
+            input_tokens=2**40,
+            output_tokens=2**40 + 1,
+            cost_usd=123456.789012,
+        )
+
+
+async def test_submitted_at_offset_and_microseconds_round_trip(tmp_path):
+    submitted_at = datetime(
+        2026,
+        7,
+        3,
+        18,
+        4,
+        56,
+        123456,
+        tzinfo=timezone(timedelta(hours=5, minutes=30)),
+    )
+    async with Store(_db(tmp_path)) as store:
+        job = _job(submitted_at=submitted_at)
+        await store.insert_pending(job)
+
+        stored = await store.get(job.job_id)
+        assert stored.submitted_at == submitted_at
+
+
 # --- finalize ----------------------------------------------------------------
 
 
@@ -176,6 +277,21 @@ async def test_finalize_ok_writes_terminal_result(tmp_path):
         # Fields fixed at insert are untouched by finalize.
         assert stored.project == "hate-moderator"
         assert stored.submitted_at == _SUBMITTED
+
+
+async def test_finalize_completed_at_with_microseconds_round_trips(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        job = _job()
+        await store.insert_pending(job)
+        completed = datetime(2026, 7, 3, 12, 35, 0, 654321, tzinfo=timezone.utc)
+
+        assert await store.finalize(
+            Result(job_id=job.job_id, status="ok"),
+            completed_at=completed,
+        )
+
+        stored = await store.get(job.job_id)
+        assert stored.completed_at == completed
 
 
 async def test_finalize_error_writes_error_and_defaults_completed_at(tmp_path):
@@ -302,4 +418,49 @@ async def test_concurrent_finalize_attempts_on_separate_connections_are_one_shot
     async with Store(path) as reader:
         stored = await reader.get(job.job_id)
         assert stored.completion in {"first", "second"}
+        assert await reader.pending_count() == 0
+
+
+async def test_many_concurrent_finalize_attempts_on_separate_connections_are_one_shot(tmp_path):
+    path = _db(tmp_path)
+    async with Store(path) as submitter:
+        job = _job()
+        await submitter.insert_pending(job)
+
+    stores = [Store(path) for _ in range(8)]
+    for store in stores:
+        await store.connect()
+    try:
+        outcomes = await asyncio.gather(
+            *(
+                store.finalize(Result(job_id=job.job_id, status="ok", completion=f"winner-{index}"))
+                for index, store in enumerate(stores)
+            )
+        )
+    finally:
+        await asyncio.gather(*(store.close() for store in stores))
+
+    assert outcomes.count(True) == 1
+    assert outcomes.count(False) == len(stores) - 1
+
+    async with Store(path) as reader:
+        stored = await reader.get(job.job_id)
+        assert stored.completion in {f"winner-{index}" for index in range(len(stores))}
+        assert await reader.pending_count() == 0
+
+
+async def test_reader_polling_observes_pending_then_terminal_across_connections(tmp_path):
+    path = _db(tmp_path)
+    async with Store(path) as writer, Store(path) as reader:
+        job = _job()
+        await writer.insert_pending(job)
+
+        assert await reader.get(job.job_id) == await writer.get(job.job_id)
+        assert await reader.pending_count() == 1
+
+        await writer.finalize(Result(job_id=job.job_id, status="ok", completion="done"))
+
+        stored = await reader.get(job.job_id)
+        assert stored.status == "ok"
+        assert stored.completion == "done"
         assert await reader.pending_count() == 0
