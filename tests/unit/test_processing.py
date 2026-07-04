@@ -8,6 +8,7 @@ time. That is exactly what lets this module sit in the mutation gate.
 """
 
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
@@ -21,7 +22,7 @@ from llmbus.processing import (
 )
 from llmbus.providers.base import ProviderResult
 from llmbus.retry import RetryPolicy, WorkerPolicy
-from llmbus.schema import Job, JobParams, Message, Usage
+from llmbus.schema import Job, JobParams, Message, Result, Usage
 from llmbus.store import Store
 
 # --- fakes -------------------------------------------------------------------
@@ -359,6 +360,51 @@ async def test_process_job_retries_a_timeout():
         assert len(provider.calls) == 2
 
 
+async def test_process_job_single_attempt_policy_does_not_retry_retryable_error():
+    async with Store(":memory:") as store:
+        job = make_job()
+        await store.insert_pending(job)
+        provider = FakeProvider("openai", [_StatusError(429), ok_result(completion="unused")])
+        deps = build_deps(store, provider, policy=make_policy(max_attempts=1))
+
+        result = await process_job(deps, job)
+
+        assert result.status == "error"
+        assert result.error == "_StatusError: status 429"
+        assert len(provider.calls) == 1
+        assert deps.rate_limiter.acquired == [("openai", estimate_tokens(job, 512))]
+        assert deps.sleep.calls == []
+
+
+async def test_process_job_uses_fresh_jitter_and_retry_index_for_each_backoff():
+    draws = iter([0.25, 0.75])
+
+    async with Store(":memory:") as store:
+        job = make_job()
+        await store.insert_pending(job)
+        provider = FakeProvider(
+            "openai",
+            [_StatusError(500), _StatusError(503), ok_result(completion="recovered")],
+        )
+        deps = build_deps(
+            store,
+            provider,
+            policy=WorkerPolicy(
+                retry=RetryPolicy(max_attempts=3, base_delay_s=2, max_delay_s=10),
+                job_timeout_s=60,
+                default_output_tokens=512,
+            ),
+            rand=lambda: next(draws),
+        )
+
+        result = await process_job(deps, job)
+
+        assert result.status == "ok"
+        # Retry 0: ceiling 2 * 0.25 = 0.5. Retry 1: ceiling 4 * 0.75 = 3.0.
+        assert deps.sleep.calls == [0.5, 3.0]
+        assert len(deps.rate_limiter.acquired) == 3
+
+
 async def test_process_job_gives_up_after_max_attempts():
     async with Store(":memory:") as store:
         job = make_job()
@@ -404,6 +450,21 @@ async def test_process_job_error_still_delivers_callback():
 
         assert len(deps.deliver_callback.deliveries) == 1
         assert deps.deliver_callback.deliveries[0][1]["status"] == "error"
+
+
+async def test_process_job_error_callback_payload_uses_usage_aliases():
+    async with Store(":memory:") as store:
+        job = make_job(callback_url="http://cb")
+        await store.insert_pending(job)
+        provider = FakeProvider("openai", [ValueError("bad prompt")])
+        deps = build_deps(store, provider)
+
+        await process_job(deps, job)
+
+        payload = deps.deliver_callback.deliveries[0][1]
+        assert payload["usage"] == {"in": 0, "out": 0, "cost_usd": 0.0}
+        assert "input_tokens" not in payload["usage"]
+        assert "output_tokens" not in payload["usage"]
 
 
 # --- process_job: routing errors ---------------------------------------------
@@ -464,6 +525,24 @@ async def test_process_job_redelivery_does_not_double_finalize_or_callback():
         assert len(deps.deliver_callback.deliveries) == 1
 
 
+async def test_process_job_redelivered_terminal_row_suppresses_error_callback_too():
+    async with Store(":memory:") as store:
+        job = make_job(callback_url="http://cb")
+        await store.insert_pending(job)
+        await store.finalize(Result(job_id=job.job_id, status="ok", completion="already done"))
+        provider = FakeProvider("openai", [ValueError("redelivery failed")])
+        deps = build_deps(store, provider)
+
+        result = await process_job(deps, job)
+
+        assert result.status == "error"
+        assert len(provider.calls) == 1
+        assert deps.deliver_callback.deliveries == []
+        stored = await store.get(job.job_id)
+        assert stored.status == "ok"
+        assert stored.completion == "already done"
+
+
 async def test_process_job_swallows_callback_failure(caplog):
     async with Store(":memory:") as store:
         job = make_job(callback_url="http://cb")
@@ -480,6 +559,26 @@ async def test_process_job_swallows_callback_failure(caplog):
         # the warning (a dropped field or wrapped format string would fail here).
         expected = f"callback POST to http://cb failed for job {job.job_id}: callback endpoint down"
         assert expected in caplog.messages
+
+
+async def test_process_job_prices_using_job_submitted_at_date_not_today():
+    async with Store(":memory:") as store:
+        job = make_job(
+            model="claude-sonnet-5",
+            submitted_at=datetime(2026, 8, 31, 23, 59, tzinfo=timezone.utc),
+        )
+        await store.insert_pending(job)
+        provider = FakeProvider(
+            "anthropic", [ok_result(completion="priced", input_tokens=1_000_000, output_tokens=0)]
+        )
+        deps = build_deps(store, provider)
+
+        result = await process_job(deps, job)
+
+        assert result.status == "ok"
+        assert result.usage.cost_usd == 2.0
+        stored = await store.get(job.job_id)
+        assert stored.usage.cost_usd == 2.0
 
 
 # --- _default_apply_timeout --------------------------------------------------
