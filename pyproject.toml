@@ -123,8 +123,13 @@ source_paths = [
     "src/llmbus/retry.py",
     "src/llmbus/processing.py",
 ]
-# config.py, store.py and worker.py are integration/I/O-touching (SDK clients,
-# SQLite, Iggy), so they are *not* mutated — same exclusion as client. But their
-# unit tests import them, so copy the unmodified modules into the mutants sandbox
-# or test collection would fail.
-also_copy = ["src/llmbus/config.py", "src/llmbus/store.py", "src/llmbus/worker.py"]
+# config.py, store.py, worker.py and client.py are integration/I/O-touching (SDK
+# clients, SQLite, Iggy), so they are *not* mutated. But their unit tests import
+# them, so copy the unmodified modules into the mutants sandbox or test collection
+# would fail.
+also_copy = [
+    "src/llmbus/config.py",
+    "src/llmbus/store.py",
+    "src/llmbus/worker.py",
+    "src/llmbus/client.py",
+]
