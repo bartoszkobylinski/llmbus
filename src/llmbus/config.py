@@ -39,6 +39,7 @@ from llmbus.providers.anthropic import AnthropicAdapter
 from llmbus.providers.base import Provider
 from llmbus.providers.openai import OpenAIAdapter
 from llmbus.ratelimit import ProviderLimits
+from llmbus.retry import RetryPolicy, WorkerPolicy
 
 
 class ConfigError(ValueError):
@@ -73,6 +74,22 @@ def _positive_float(env: Mapping[str, str], key: str) -> float:
         raise ConfigError(f"setting {key} must be a number, got {raw!r}") from None
     if not math.isfinite(value) or value <= 0:
         raise ConfigError(f"setting {key} must be a positive finite number, got {value!r}")
+    return value
+
+
+def _positive_int(env: Mapping[str, str], key: str) -> int:
+    """Parse a strictly-positive integer setting, or raise `ConfigError`.
+
+    Rejects non-integers and non-positive values — a zero/negative retry count or
+    token estimate is a config bug that would stall or mis-throttle the worker, so
+    it is caught at load time like every other setting."""
+    raw = _require(env, key)
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ConfigError(f"setting {key} must be an integer, got {raw!r}") from None
+    if value <= 0:
+        raise ConfigError(f"setting {key} must be a positive integer, got {value!r}")
     return value
 
 
@@ -142,6 +159,31 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         load_dotenv()
         env = os.environ
     return parse_config(env)
+
+
+def parse_worker_policy(env: Mapping[str, str]) -> WorkerPolicy:
+    """Parse the worker's retry/timeout/token policy from an environment mapping.
+
+    Worker-only, so it is parsed separately from `Config` — a producer that only
+    submits jobs (`client.py`) never needs these keys, and only the worker host
+    supplies them. Pure over an injected mapping, like `parse_config`. The cross-
+    field rule (`WORKER_BACKOFF_MAX_S >= WORKER_BACKOFF_BASE_S`) is enforced by
+    `RetryPolicy` and re-raised as `ConfigError` so a bad `.env` fails uniformly.
+    """
+    # Parse each field first (these raise ConfigError directly on a bad value), so
+    # the try wraps only RetryPolicy's cross-field check (max >= base), not them.
+    max_attempts = _positive_int(env, "WORKER_MAX_ATTEMPTS")
+    base_delay_s = _positive_float(env, "WORKER_BACKOFF_BASE_S")
+    max_delay_s = _positive_float(env, "WORKER_BACKOFF_MAX_S")
+    try:
+        retry = RetryPolicy(max_attempts, base_delay_s, max_delay_s)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    return WorkerPolicy(
+        retry=retry,
+        job_timeout_s=_positive_float(env, "WORKER_JOB_TIMEOUT_S"),
+        default_output_tokens=_positive_int(env, "WORKER_DEFAULT_OUTPUT_TOKENS"),
+    )
 
 
 # A factory that turns an API key into an SDK client. Injected into
