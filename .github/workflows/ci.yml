@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Newer pushes to the same ref cancel in-flight runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Gate — lint · types · tests · coverage · mutation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      # Frozen, no extras — the exact env the merge gate is defined against. The
+      # LLM SDKs + httpx live in the `worker` extra, so live_api and the httpx
+      # sender tests skip here (importorskip), exactly as intended.
+      - name: Sync (frozen)
+        run: uv sync --frozen
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Mypy (strict, src/)
+        run: uv run mypy
+
+      - name: Unit tests + coverage (fail under 90%)
+        run: uv run pytest -m "not integration" --cov=llmbus --cov-report=term-missing
+
+      - name: Mutation testing (0 surviving mutants)
+        run: |
+          uv run mutmut run
+          survived=$(uv run mutmut result-ids survived 2>/dev/null | grep -acE '__mutmut_[0-9]+' || true)
+          echo "surviving mutants: ${survived}"
+          test "${survived}" -eq 0
+
+  integration:
+    name: Integration — live Iggy consume loop
+    runs-on: ubuntu-latest
+    services:
+      # apache/iggy 0.8.0 is the io_uring / thread-per-core server: it runs on a
+      # real Linux kernel (this runner) but needs seccomp relaxed for io_uring and
+      # CAP_SYS_NICE for its hwloc memory binding. (It cannot run under Docker
+      # Desktop on macOS, where the VM kernel lacks io_uring — hence CI, not local.)
+      iggy:
+        image: apache/iggy:0.8.0
+        ports:
+          - 8090:8090
+        options: >-
+          --security-opt seccomp=unconfined
+          --cap-add SYS_NICE
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      # The integration wiring needs the `worker` extra (httpx). Only integration-
+      # marked tests run, so the billable live_api test (marker: live_api) is never
+      # selected and no API keys are required.
+      - name: Sync (worker extra)
+        run: uv sync --extra worker
+
+      - name: Wait for Iggy on 8090
+        run: |
+          for i in $(seq 1 60); do
+            if timeout 1 bash -c ':> /dev/tcp/127.0.0.1/8090' 2>/dev/null; then
+              echo "Iggy reachable after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Iggy did not become ready on 8090"
+          exit 1
+
+      - name: Integration tests (must run, not skip)
+        env:
+          IGGY_ADDRESS: 127.0.0.1:8090
+          IGGY_USERNAME: iggy
+          IGGY_PASSWORD: iggy
+          LLMBUS_REQUIRE_IGGY: "1"
+        run: uv run pytest -m integration -v

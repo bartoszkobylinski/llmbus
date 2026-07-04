@@ -51,7 +51,11 @@ async def _connect_or_skip() -> IggyClient:
     try:
         await asyncio.wait_for(client.connect(), timeout=5)
         await asyncio.wait_for(client.login_user(_USER, _PASS), timeout=5)
-    except (Exception, asyncio.TimeoutError) as exc:  # noqa: BLE001 - any failure ⇒ no broker, skip
+    except (Exception, asyncio.TimeoutError) as exc:  # noqa: BLE001 - any failure ⇒ no broker
+        # Locally a missing broker is a skip; in CI (LLMBUS_REQUIRE_IGGY set) it is a
+        # failure — otherwise a broken Iggy service would fake a green integration run.
+        if os.environ.get("LLMBUS_REQUIRE_IGGY"):
+            raise
         pytest.skip(f"local Iggy not reachable at {_ADDR}: {exc}")
     return client
 
