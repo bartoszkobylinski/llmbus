@@ -100,6 +100,7 @@ w PR `worker-loop` z testami integracyjnymi. `process_job(deps, job)` to rdzeń;
 - **koszt:** z usage, per `project` → tabela kosztów (podstawa budżetu). Cennik jest **datowany** (`cost.py`: każdy model ma historię cen z datą wejścia w życie) — koszt liczony po stawce obowiązującej w dniu `submitted_at`, więc zaplanowane zmiany (np. koniec ceny promo Sonnet 5 dnia 2026-09-01) rozwiązują się same, bez ręcznej edycji i bez pobierania cen z sieci. `Decimal` z `cost.py` schodzi do `float` dopiero na granicy `Result.usage.cost_usd`. (Zapytanie agregujące per projekt/dzień dołoży się w PR `worker-loop`.)
 - **idempotencja:** przy at-least-once (worker padł po modelu, przed commitem offsetu) job wraca; `store.finalize` jest one-shot (`WHERE status='pending'`), więc redostawa dostaje `False` → brak podwójnego zapisu i podwójnego callbacku. Redostawa **ponawia** wywołanie modelu (koszt) — świadomy, rzadki koszt (tylko recovery po crashu), a `finalize` jest gwarancją poprawności. hate-mod ma dodatkowo własny dedup po `comment_id`.
 - **callback (§14 #14):** worker POST-uje `Result` (JSON, `by_alias`) na `callback_url` klientem **httpx** (extra `worker`). Dostawa jest **best-effort**: błąd POST-a → log + swallow, **bez retry** callbacku w v1 — wynik jest już trwale w store, więc poll (§11) to niezawodna ścieżka; retry/dead-letter callbacku to v2 (§13). Callback leci tylko gdy *ta* dostawa wygrała `finalize` (brak duplikatów).
+- **pętla consumer-group (`worker.py`, PR `worker-loop`):** cienka powłoka Iggy. `consumer_group` (join `llm-workers`, `create_if_not_exists`) + `consume_messages(callback, shutdown_event)` z `AutoCommit.After(ConsumingEachMessage)` → **commit offsetu PO przetworzeniu** (at-least-once; redostawa bezpieczna przez one-shot `finalize`). Topologia (`Topology`: stream `llmbus`/topic `llm-jobs`/1 partycja/grupa `llm-workers`) domyślna, ale wstrzykiwalna (izolacja testów integracyjnych po uuid). Payload → `Job` przez `decode_job` (pydantic, `extra="forbid"`). **Poison message (§14 #15):** ciało nieparsujące się na `Job` → log (z obciętym raw) + skip + commit dalej; halt/retry zawiesiłyby jedynego workera na jednej złej wiadomości, a bez `job_id` i tak nie ma czego finalizować (dead-letter → v2, §13). Wejście: `run_worker` (wiring config→deps + pętla, powłoka I/O, poza bramką mutacyjną, testy integracyjne na żywym Iggy) + `python -m llmbus.worker` z SIGINT/SIGTERM → `shutdown`. Czyste szwy (`decode_job`, `ensure_topology`, `make_callback_sender`, `_consume_one`, `_load`) — unit-testy z atrapami.
 
 ## 7. Abstrakcja providera
 Interfejs `call(model, messages, params) -> {completion, usage}`; implementacje `openai.py`, `anthropic.py`. Mapowanie `model → provider`, normalizacja usage/kosztu do wspólnego formatu. Miejsce na trzeciego (OpenRouter) później.
@@ -172,7 +173,7 @@ WantedBy=multi-user.target
 **Zasada:** dwa osobne serwery, dwa osobne logi — standardowe rozdzielenie dev/prod.
 
 ## 10. Konfiguracja i sekrety
-`.env`: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `IGGY_ADDRESS`, limity (req/min, tok/min per provider), budżety per projekt. Nic hardcoded (python-dotenv).
+`.env`: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `IGGY_ADDRESS`/`IGGY_USERNAME`/`IGGY_PASSWORD`, `STORE_PATH` (plik SQLite — pisany przez workera, czytany pollem przez producenta, §9b), limity (req/min, tok/min per provider), polityka workera (`WORKER_*`, §6/§14 #11) i budżety per projekt. Nic hardcoded (python-dotenv). `Config` (współdzielony producent+worker) niesie klucze/Iggy/`db_path`; `WorkerPolicy` (`parse_worker_policy`) parsuje `WORKER_*` osobno, bo producent ich nie potrzebuje.
 
 ## 11. Obserwowalność
 - **Audyt:** topic `llm-jobs` = log wszystkich promptów (replay).
@@ -185,8 +186,11 @@ WantedBy=multi-user.target
   pisarza). Jeden wiersz na job keyowany `job_id`: `pending` → `ok`/`error`; `finalize`
   jest one-shot (`WHERE status='pending'`) → idempotencja przy redostawie (§6). Wiersz
   trzyma pola `Result` **plus** `project`/`model`/`submitted_at` (potrzebne do kosztu per
-  projekt/dzień, których `Result` nie niesie). Zapytanie agregujące koszt dołoży się przy
-  okablowaniu `cost.py` w PR `worker`.
+  projekt/dzień, których `Result` nie niesie).
+- **Koszt (impl., PR `worker-loop`):** `Store.cost_by_project_day()` — `SUM(cost_usd)`
+  grupowany po `project` i `substr(submitted_at,1,10)` (literalny dzień ISO, ta sama data,
+  po której `cost.py` wycenia, §6). Wiersze `pending`/`error` mają koszt `0.0`, więc nie
+  wpływają. To „tabela w store per projekt/dzień" z góry tej sekcji.
 
 ## 12. Braki Iggy SDK, które tu uderzysz (nie blokują v1)
 - **nagłówki wiadomości** — metadane w headerach zamiast body.
@@ -275,3 +279,11 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    dead-letter callbacku → v2 (§13). Odrzucone: bounded retry callbacku (wciąga
    dead-letter do v1) i stdlib `urllib` (blokujący, nieidiomatyczny w async). Sender
    wstrzykiwany do `process_job`; prawdziwy httpx w PR `worker-loop`.
+15. ~~**Poison message: ciało na `llm-jobs`, które nie parsuje się na `Job`.**~~
+   **ROZSTRZYGNIĘTE (PR `worker-loop`) — log + skip + commit dalej.** Nieparsowalna
+   wiadomość (zły JSON lub złamany kontrakt §4, `extra="forbid"`) nie ma poprawnego
+   `job_id`, więc nie da się jej sfinalizować w store ani nigdy nie przejdzie; jest
+   logowana (z obciętym raw payloadem) i pomijana, a offset commituje dalej. Odrzucone:
+   halt workera (jedna zła wiadomość kładzie cały bus) i retry/park (nieskończona
+   redostawa tej samej trucizny — zawiesza jedynego workera). Trwały dead-letter
+   (persist raw) → v2 (§13), bo v1 nie ma dead-letter topicu.

@@ -9,7 +9,11 @@ Design: **[ARCHITECTURE.md](./ARCHITECTURE.md)**. Agent/dev notes: **[CLAUDE.md]
 
 ## Status
 
-Early v1 — **foundation + message contract** only. Not yet functional end-to-end.
+Early v1. Message contract, providers, rate-limit, cost, store, the job-processing
+core, and the **Iggy consumer worker** are in; the producer client (`submit()` /
+`await_result()`) is the last piece before it runs end-to-end. The live consume
+loop is covered by an integration test that needs a local Iggy (`docker compose up
+-d`; skips otherwise).
 
 ## Dev setup
 

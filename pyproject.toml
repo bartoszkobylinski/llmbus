@@ -84,7 +84,7 @@ warn_required_dynamic_aliases = true
 # factories. Ignore the missing imports rather than force the heavy SDKs into the
 # merge-gate mypy run — the factories are typed `-> Any` and covered by the extra.
 [[tool.mypy.overrides]]
-module = ["openai", "anthropic"]
+module = ["openai", "anthropic", "httpx"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -123,8 +123,8 @@ source_paths = [
     "src/llmbus/retry.py",
     "src/llmbus/processing.py",
 ]
-# config.py and store.py are integration/I/O-touching (SDK clients, SQLite), so
-# they are *not* mutated — same exclusion as worker/client. But their unit tests
-# import them, so copy the unmodified modules into the mutants sandbox or test
-# collection would fail.
-also_copy = ["src/llmbus/config.py", "src/llmbus/store.py"]
+# config.py, store.py and worker.py are integration/I/O-touching (SDK clients,
+# SQLite, Iggy), so they are *not* mutated — same exclusion as client. But their
+# unit tests import them, so copy the unmodified modules into the mutants sandbox
+# or test collection would fail.
+also_copy = ["src/llmbus/config.py", "src/llmbus/store.py", "src/llmbus/worker.py"]

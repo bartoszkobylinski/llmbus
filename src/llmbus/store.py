@@ -83,6 +83,19 @@ class StoredJob:
         return self.status != PENDING
 
 
+@dataclass(frozen=True)
+class ProjectDayCost:
+    """Total USD spend for one `project` on one `day` (the cost ledger, §6/§11).
+
+    `day` is the `YYYY-MM-DD` of the job's `submitted_at` (the same date `cost.py`
+    prices at, §6), so a day's spend is grouped exactly as it was billed.
+    """
+
+    project: str
+    day: str
+    cost_usd: float
+
+
 class Store:
     """Async SQLite results store. One instance owns one aiosqlite connection.
 
@@ -203,6 +216,25 @@ class Store:
         row = await cursor.fetchone()
         assert row is not None  # COUNT(*) always returns exactly one row
         return int(row[0])
+
+    async def cost_by_project_day(self) -> list[ProjectDayCost]:
+        """The cost ledger: total USD per project per day (§6/§11).
+
+        Groups on the `YYYY-MM-DD` prefix of the stored ISO `submitted_at` — a
+        literal substring, so it never reinterprets the timestamp's offset — and
+        sums `cost_usd` (pending/error rows carry 0.0, so they contribute nothing).
+        Ordered by day then project for a stable ledger read.
+        """
+        cursor = await self._conn.execute(
+            """
+            SELECT project, substr(submitted_at, 1, 10) AS day, SUM(cost_usd) AS total
+              FROM jobs
+             GROUP BY project, day
+             ORDER BY day, project
+            """
+        )
+        rows = await cursor.fetchall()
+        return [ProjectDayCost(row["project"], row["day"], float(row["total"])) for row in rows]
 
 
 def _row_to_stored_job(row: aiosqlite.Row) -> StoredJob:

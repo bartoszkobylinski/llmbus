@@ -118,6 +118,7 @@ class Config:
     iggy_address: str
     iggy_username: str
     iggy_password: str
+    db_path: str
 
     def __post_init__(self) -> None:
         # Copy first so a caller mutating the dict they passed in can't reach back
@@ -146,6 +147,9 @@ def parse_config(env: Mapping[str, str]) -> Config:
         iggy_address=_require(env, "IGGY_ADDRESS"),
         iggy_username=_require(env, "IGGY_USERNAME"),
         iggy_password=_require(env, "IGGY_PASSWORD"),
+        # The SQLite results file. Shared: the worker writes it and a co-located
+        # producer polls it (§3/§9b), so both resolve the same path from config.
+        db_path=_require(env, "STORE_PATH"),
     )
 
 

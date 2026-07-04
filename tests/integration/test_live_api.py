@@ -47,6 +47,7 @@ def _live_config() -> Config:
         iggy_address="",
         iggy_username="",
         iggy_password="",
+        db_path=":memory:",
     )
 
 

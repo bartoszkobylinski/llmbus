@@ -34,6 +34,7 @@ _ENV = {
     "IGGY_ADDRESS": "127.0.0.1:8090",
     "IGGY_USERNAME": "iggy",
     "IGGY_PASSWORD": "iggy",
+    "STORE_PATH": "llmbus.db",
 }
 
 
@@ -136,6 +137,7 @@ def test_parse_config_reads_every_field():
         iggy_address="127.0.0.1:8090",
         iggy_username="iggy",
         iggy_password="iggy",
+        db_path="llmbus.db",
     )
 
 
@@ -161,6 +163,7 @@ def test_config_constructor_rate_limits_are_immutable():
         iggy_address="127.0.0.1:8090",
         iggy_username="iggy",
         iggy_password="iggy",
+        db_path="llmbus.db",
     )
 
     with pytest.raises(TypeError):
@@ -178,6 +181,7 @@ def test_config_constructor_copies_rate_limits_before_freezing():
         iggy_address="127.0.0.1:8090",
         iggy_username="iggy",
         iggy_password="iggy",
+        db_path="llmbus.db",
     )
 
     original_limits["openai"] = ProviderLimits(requests_per_min=1, tokens_per_min=1)
@@ -200,6 +204,7 @@ def test_config_constructor_copies_rate_limits_before_freezing():
         "IGGY_ADDRESS",
         "IGGY_USERNAME",
         "IGGY_PASSWORD",
+        "STORE_PATH",
     ],
 )
 def test_parse_config_requires_every_setting(missing):

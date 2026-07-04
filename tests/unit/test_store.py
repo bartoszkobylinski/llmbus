@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from llmbus.schema import Job, Message, Result, Usage
-from llmbus.store import PENDING, Store, StoredJob
+from llmbus.store import PENDING, ProjectDayCost, Store, StoredJob
 
 # A fixed submitted_at so round-trips through the store assert an exact value.
 _SUBMITTED = datetime(2026, 7, 3, 12, 34, 56, tzinfo=timezone.utc)
@@ -464,3 +464,71 @@ async def test_reader_polling_observes_pending_then_terminal_across_connections(
         assert stored.status == "ok"
         assert stored.completion == "done"
         assert await reader.pending_count() == 0
+
+
+# --- cost_by_project_day (ledger, §6/§11) ------------------------------------
+
+
+async def _finalized(store, *, project, submitted_at, cost):
+    """Insert then finalize an `ok` job so its row carries a terminal cost_usd."""
+    job = _job(project=project, submitted_at=submitted_at)
+    await store.insert_pending(job)
+    await store.finalize(Result(job_id=job.job_id, status="ok", usage=Usage(cost_usd=cost)))
+    return job
+
+
+async def test_cost_by_project_day_empty_store_is_empty(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        assert await store.cost_by_project_day() == []
+
+
+async def test_cost_by_project_day_sums_within_a_project_day(tmp_path):
+    day = datetime(2026, 7, 3, 8, 0, tzinfo=timezone.utc)
+    async with Store(_db(tmp_path)) as store:
+        await _finalized(store, project="a", submitted_at=day, cost=0.5)
+        await _finalized(store, project="a", submitted_at=day.replace(hour=20), cost=0.25)
+        assert await store.cost_by_project_day() == [ProjectDayCost("a", "2026-07-03", 0.75)]
+
+
+async def test_cost_by_project_day_separates_projects_and_days_ordered(tmp_path):
+    d1 = datetime(2026, 7, 3, tzinfo=timezone.utc)
+    d2 = datetime(2026, 7, 4, tzinfo=timezone.utc)
+    async with Store(_db(tmp_path)) as store:
+        await _finalized(store, project="b", submitted_at=d1, cost=1.0)
+        await _finalized(store, project="a", submitted_at=d1, cost=2.0)
+        await _finalized(store, project="a", submitted_at=d2, cost=4.0)
+        # Ordered by day, then project.
+        assert await store.cost_by_project_day() == [
+            ProjectDayCost("a", "2026-07-03", 2.0),
+            ProjectDayCost("b", "2026-07-03", 1.0),
+            ProjectDayCost("a", "2026-07-04", 4.0),
+        ]
+
+
+async def test_cost_by_project_day_pending_and_error_rows_contribute_zero(tmp_path):
+    day = datetime(2026, 7, 3, tzinfo=timezone.utc)
+    async with Store(_db(tmp_path)) as store:
+        await store.insert_pending(_job(project="a", submitted_at=day))  # pending → 0
+        errored = _job(project="a", submitted_at=day)
+        await store.insert_pending(errored)
+        await store.finalize(Result(job_id=errored.job_id, status="error", error="boom"))  # 0 cost
+        await _finalized(store, project="a", submitted_at=day, cost=0.5)
+        assert await store.cost_by_project_day() == [ProjectDayCost("a", "2026-07-03", 0.5)]
+
+
+async def test_cost_by_project_day_groups_the_date_across_times(tmp_path):
+    # Same calendar date, different times/microseconds → one grouped row.
+    async with Store(_db(tmp_path)) as store:
+        await _finalized(
+            store,
+            project="a",
+            submitted_at=datetime(2026, 7, 3, 0, 0, 0, 1, tzinfo=timezone.utc),
+            cost=1.0,
+        )
+        await _finalized(
+            store,
+            project="a",
+            submitted_at=datetime(2026, 7, 3, 23, 59, 59, tzinfo=timezone.utc),
+            cost=2.0,
+        )
+        assert await store.cost_by_project_day() == [ProjectDayCost("a", "2026-07-03", 3.0)]
