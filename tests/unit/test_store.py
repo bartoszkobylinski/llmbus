@@ -516,6 +516,17 @@ async def test_cost_by_project_day_pending_and_error_rows_contribute_zero(tmp_pa
         assert await store.cost_by_project_day() == [ProjectDayCost("a", "2026-07-03", 0.5)]
 
 
+async def test_cost_by_project_day_omits_projects_with_only_zero_cost_rows(tmp_path):
+    day = datetime(2026, 7, 3, tzinfo=timezone.utc)
+    async with Store(_db(tmp_path)) as store:
+        await store.insert_pending(_job(project="pending-only", submitted_at=day))
+        errored = _job(project="error-only", submitted_at=day)
+        await store.insert_pending(errored)
+        await store.finalize(Result(job_id=errored.job_id, status="error", error="boom"))
+
+        assert await store.cost_by_project_day() == []
+
+
 async def test_cost_by_project_day_groups_the_date_across_times(tmp_path):
     # Same calendar date, different times/microseconds → one grouped row.
     async with Store(_db(tmp_path)) as store:
@@ -532,3 +543,22 @@ async def test_cost_by_project_day_groups_the_date_across_times(tmp_path):
             cost=2.0,
         )
         assert await store.cost_by_project_day() == [ProjectDayCost("a", "2026-07-03", 3.0)]
+
+
+async def test_cost_by_project_day_uses_literal_submitted_at_date_with_offset(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        await _finalized(
+            store,
+            project="a",
+            submitted_at=datetime(
+                2026,
+                7,
+                3,
+                23,
+                30,
+                tzinfo=timezone(timedelta(hours=-3)),
+            ),
+            cost=1.0,
+        )
+
+        assert await store.cost_by_project_day() == [ProjectDayCost("a", "2026-07-03", 1.0)]

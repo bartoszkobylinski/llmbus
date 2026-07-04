@@ -189,8 +189,9 @@ WantedBy=multi-user.target
   projekt/dzień, których `Result` nie niesie).
 - **Koszt (impl., PR `worker-loop`):** `Store.cost_by_project_day()` — `SUM(cost_usd)`
   grupowany po `project` i `substr(submitted_at,1,10)` (literalny dzień ISO, ta sama data,
-  po której `cost.py` wycenia, §6). Wiersze `pending`/`error` mają koszt `0.0`, więc nie
-  wpływają. To „tabela w store per projekt/dzień" z góry tej sekcji.
+  po której `cost.py` wycenia, §6), z `HAVING SUM(cost_usd) > 0`: grupy bez realnego wydatku
+  (tylko `pending`/`error`, albo darmowe completiony) są **pominięte** — księga wydatków
+  pokazuje realny koszt, nie wiersze `$0.00`. To „tabela w store per projekt/dzień" z góry tej sekcji.
 
 ## 12. Braki Iggy SDK, które tu uderzysz (nie blokują v1)
 - **nagłówki wiadomości** — metadane w headerach zamiast body.

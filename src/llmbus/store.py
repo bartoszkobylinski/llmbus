@@ -222,14 +222,17 @@ class Store:
 
         Groups on the `YYYY-MM-DD` prefix of the stored ISO `submitted_at` — a
         literal substring, so it never reinterprets the timestamp's offset — and
-        sums `cost_usd` (pending/error rows carry 0.0, so they contribute nothing).
-        Ordered by day then project for a stable ledger read.
+        sums `cost_usd`. `HAVING SUM(...) > 0` omits groups with no actual spend
+        (pending-only, error-only, or genuinely-free completions): a spend ledger
+        lists real spend, not `$0.00` rows for days a project merely had activity.
+        Ordered by day then project for a stable read.
         """
         cursor = await self._conn.execute(
             """
             SELECT project, substr(submitted_at, 1, 10) AS day, SUM(cost_usd) AS total
               FROM jobs
              GROUP BY project, day
+            HAVING SUM(cost_usd) > 0
              ORDER BY day, project
             """
         )

@@ -157,6 +157,15 @@ def test_decode_job_rejects_missing_required_field():
         decode_job(b'{"project":"p"}')
 
 
+def test_default_topology_pins_v1_consumer_group_and_single_partition():
+    assert DEFAULT_TOPOLOGY == Topology(
+        stream="llmbus",
+        topic="llm-jobs",
+        consumer_group="llm-workers",
+        partitions=1,
+    )
+
+
 # --- ensure_topology ---------------------------------------------------------
 
 
@@ -256,6 +265,24 @@ async def test_consume_one_drops_a_poison_message(caplog):
 
         assert provider.calls == []
         assert "dropping poison message at offset 7" in caplog.text
+
+
+async def test_consume_one_truncates_poison_payload_in_log(caplog):
+    async with Store(":memory:") as store:
+        provider = FakeProvider("openai", [])
+        deps = build_deps(store, provider)
+        payload = b'{"not":"a job","padding":"' + (b"x" * 1_000) + b'"}'
+
+        await _consume_one(deps, FakeMessage(payload, offset=9))
+
+        assert provider.calls == []
+        assert "dropping poison message at offset 9" in caplog.text
+        assert "raw=" in caplog.text
+        # Truncated to the first 500 bytes of the raw payload (prefix + ~474 x's),
+        # not the full 1000-x body — asserted precisely and independent of the
+        # JSON prefix length via the logged repr.
+        assert repr(payload[:500]) in caplog.text
+        assert repr(payload) not in caplog.text
 
 
 # --- _load -------------------------------------------------------------------
