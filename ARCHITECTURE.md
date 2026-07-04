@@ -41,7 +41,7 @@ IG webhook ─▶ hate-mod: llmbus.submit(...) ─▶ [topic llm-jobs] ─▶ wo
 
 Kroki:
 1. Webhook IG dostaje komentarz.
-2. hate-mod woła `llmbus.submit(project="hate-moderator", kind="classify", model=…, messages=[…], callback="…/internal/classified", meta={comment_id})` → dostaje `job_id`, **zwraca 200 OK natychmiast**. Web nie dotyka OpenAI.
+2. hate-mod buduje `Job(project="hate-moderator", kind="classify", model=…, messages=[…], callback_url="…/internal/classified", meta={comment_id})` i woła `bus.submit(job)` → dostaje `job_id`, **zwraca 200 OK natychmiast**. Web nie dotyka OpenAI. (`submit` bierze `Job`, bo kontrakt §4 *jest* API — nie kwargs; PR `client`.)
 3. Zlecenie ląduje na `llm-jobs` (trwałe, przeżywa restart).
 4. Worker bierze je, woła model z **centralnym** rate-limit/retry, liczy koszt.
 5. Worker zapisuje wynik do store i **POST-uje callback** do hate-mod.
@@ -222,6 +222,10 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    store, który worker zapisuje (współlokacja, §9b). Mechanika: `submit()` wstawia wiersz
    `pending`, worker `finalize` → terminal; `await_result` odpytuje store aż status będzie
    terminalny. To samo `pending` daje przybliżenie lagu (§11). Decyzja podjęta w PR `store`.
+   **Wdrożone w PR `client`:** `BusClient.submit(job)` (wstawia `pending` + wysyła na
+   `llm-jobs`, partycja 0) / `await_result(job_id)` (poll store, `TimeoutError` po czasie)
+   nad współdzielonym store, `from_env`/`from_config`/async-context-manager. Powierzchnia
+   importu tylko-producent (apache-iggy + aiosqlite, bez SDK LLM/httpx — §10, §14 #3).
 8. ~~Statyczne typowanie: wprowadzać type-checker do bramki merge?~~ **ROZSTRZYGNIĘTE:**
    `mypy --strict` nad `src/` to **obowiązkowa bramka merge** (0 błędów; testy wyłączone,
    analogicznie do ruff `tests/** = ANN`). To jedyne, co egzekwuje **semantyczną** stronę
