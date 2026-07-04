@@ -64,6 +64,12 @@ class FakeIggyClient:
         self.created_topics.append((stream, name, partitions))
 
 
+class FailingSendIggyClient(FakeIggyClient):
+    async def send_messages(self, stream, topic, partition, messages):
+        await super().send_messages(stream, topic, partition, messages)
+        raise RuntimeError("broker unavailable")
+
+
 # --- builders ----------------------------------------------------------------
 
 
@@ -288,6 +294,21 @@ async def test_submit_of_a_duplicate_job_id_is_store_noop_but_still_sends():
         assert len(iggy.sent) == 2  # but both were sent; redelivery is worker-safe
 
 
+async def test_submit_keeps_pending_row_when_send_fails_after_insert():
+    async with Store(":memory:") as store:
+        iggy = FailingSendIggyClient()
+        bus = make_client(store, iggy)
+        job = make_job()
+
+        with pytest.raises(RuntimeError, match="broker unavailable"):
+            await bus.submit(job)
+
+        stored = await store.get(job.job_id)
+        assert stored is not None
+        assert stored.status == "pending"
+        assert len(iggy.sent) == 1
+
+
 async def test_submit_uses_the_injected_topology():
     async with Store(":memory:") as store:
         iggy = FakeIggyClient()
@@ -311,6 +332,20 @@ async def test_await_result_returns_the_terminal_result():
 
         assert result.job_id == job.job_id
         assert result.status == "ok"
+
+
+async def test_await_result_returns_already_terminal_without_sending():
+    async with Store(":memory:") as store:
+        job = make_job()
+        await store.insert_pending(job)
+        await store.finalize(ok_result(job.job_id, completion="cached"))
+        iggy = FakeIggyClient()
+        bus = make_client(store, iggy)
+
+        result = await bus.await_result(job.job_id, timeout_s=0.0)
+
+        assert result.completion == "cached"
+        assert iggy.sent == []
 
 
 async def test_await_result_times_out_on_a_pending_job():
