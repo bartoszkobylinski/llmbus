@@ -145,6 +145,12 @@ def test_parse_config_is_frozen():
         cfg.openai_api_key = "sk-other"  # type: ignore[misc]
 
 
+def test_parse_config_rate_limits_are_immutable():
+    cfg = parse_config(_ENV)
+    with pytest.raises(TypeError):
+        cfg.rate_limits["openai"] = ProviderLimits(requests_per_min=1, tokens_per_min=1)
+
+
 @pytest.mark.parametrize(
     "missing",
     [
@@ -233,6 +239,18 @@ def test_build_providers_passes_each_api_key_to_its_factory():
     recorder = {}
     _providers_with_fakes(recorder)
     assert recorder == {"openai_key": "sk-openai", "anthropic_key": "sk-anthropic"}
+
+
+def test_build_providers_with_injected_factories_does_not_import_sdks(monkeypatch):
+    def _reject_sdk_import(name, *args, **kwargs):
+        if name in {"openai", "anthropic"}:
+            raise AssertionError(f"{name} must not be imported when factories are injected")
+        return original_import(name, *args, **kwargs)
+
+    original_import = __import__
+    monkeypatch.setattr("builtins.__import__", _reject_sdk_import)
+
+    _providers_with_fakes()
 
 
 def test_build_providers_wires_the_injected_client_into_each_adapter():

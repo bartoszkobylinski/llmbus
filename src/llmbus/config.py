@@ -30,6 +30,7 @@ import math
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from dotenv import load_dotenv
@@ -106,10 +107,15 @@ def parse_config(env: Mapping[str, str]) -> Config:
     return Config(
         openai_api_key=_require(env, "OPENAI_API_KEY"),
         anthropic_api_key=_require(env, "ANTHROPIC_API_KEY"),
-        rate_limits={
-            "openai": _provider_limits(env, "OPENAI"),
-            "anthropic": _provider_limits(env, "ANTHROPIC"),
-        },
+        # Wrapped in a read-only view so the "frozen after load" contract holds at
+        # runtime too: `frozen=True` only blocks rebinding the field, not mutating
+        # a plain dict behind it. The `Mapping` annotation was a static-only promise.
+        rate_limits=MappingProxyType(
+            {
+                "openai": _provider_limits(env, "OPENAI"),
+                "anthropic": _provider_limits(env, "ANTHROPIC"),
+            }
+        ),
         iggy_address=_require(env, "IGGY_ADDRESS"),
         iggy_username=_require(env, "IGGY_USERNAME"),
         iggy_password=_require(env, "IGGY_PASSWORD"),

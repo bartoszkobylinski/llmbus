@@ -339,6 +339,11 @@ def test_job_params_reject_unknown_field():
         JobParams(temperatur=0.5)
 
 
+def test_job_params_reject_response_format_v1_contract():
+    with pytest.raises(ValidationError):
+        JobParams(response_format="json_object")
+
+
 def test_usage_rejects_unknown_field():
     with pytest.raises(ValidationError):
         Usage.model_validate({"in": 1, "out": 2, "cost_usd": 0.0, "total": 3})
