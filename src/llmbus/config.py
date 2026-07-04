@@ -86,7 +86,14 @@ def _provider_limits(env: Mapping[str, str], prefix: str) -> ProviderLimits:
 
 @dataclass(frozen=True)
 class Config:
-    """Resolved bus configuration (§10). Frozen — settings are fixed after load."""
+    """Resolved bus configuration (§10). Frozen — settings are fixed after load.
+
+    `frozen=True` only blocks rebinding a field; it does nothing for the *contents*
+    of a mutable field. So `rate_limits` is deep-frozen in `__post_init__`: it is
+    copied into a read-only `MappingProxyType`, making the "settings are fixed after
+    load" contract hold at runtime for every construction path — not just
+    `parse_config()` — since `Config` is public and built directly (e.g. tests).
+    """
 
     openai_api_key: str
     anthropic_api_key: str
@@ -94,6 +101,12 @@ class Config:
     iggy_address: str
     iggy_username: str
     iggy_password: str
+
+    def __post_init__(self) -> None:
+        # Copy first so a caller mutating the dict they passed in can't reach back
+        # through the proxy; object.__setattr__ because the dataclass is frozen.
+        frozen_limits = MappingProxyType(dict(self.rate_limits))
+        object.__setattr__(self, "rate_limits", frozen_limits)
 
 
 def parse_config(env: Mapping[str, str]) -> Config:
@@ -107,15 +120,12 @@ def parse_config(env: Mapping[str, str]) -> Config:
     return Config(
         openai_api_key=_require(env, "OPENAI_API_KEY"),
         anthropic_api_key=_require(env, "ANTHROPIC_API_KEY"),
-        # Wrapped in a read-only view so the "frozen after load" contract holds at
-        # runtime too: `frozen=True` only blocks rebinding the field, not mutating
-        # a plain dict behind it. The `Mapping` annotation was a static-only promise.
-        rate_limits=MappingProxyType(
-            {
-                "openai": _provider_limits(env, "OPENAI"),
-                "anthropic": _provider_limits(env, "ANTHROPIC"),
-            }
-        ),
+        # Passed as a plain dict; Config.__post_init__ deep-freezes it into a
+        # read-only mapping, so the immutability guarantee lives in exactly one place.
+        rate_limits={
+            "openai": _provider_limits(env, "OPENAI"),
+            "anthropic": _provider_limits(env, "ANTHROPIC"),
+        },
         iggy_address=_require(env, "IGGY_ADDRESS"),
         iggy_username=_require(env, "IGGY_USERNAME"),
         iggy_password=_require(env, "IGGY_PASSWORD"),

@@ -151,6 +151,22 @@ def test_parse_config_rate_limits_are_immutable():
         cfg.rate_limits["openai"] = ProviderLimits(requests_per_min=1, tokens_per_min=1)
 
 
+def test_config_constructor_rate_limits_are_immutable():
+    cfg = Config(
+        openai_api_key="sk-openai",
+        anthropic_api_key="sk-anthropic",
+        rate_limits={
+            "openai": ProviderLimits(requests_per_min=500, tokens_per_min=200000),
+        },
+        iggy_address="127.0.0.1:8090",
+        iggy_username="iggy",
+        iggy_password="iggy",
+    )
+
+    with pytest.raises(TypeError):
+        cfg.rate_limits["openai"] = ProviderLimits(requests_per_min=1, tokens_per_min=1)
+
+
 @pytest.mark.parametrize(
     "missing",
     [
