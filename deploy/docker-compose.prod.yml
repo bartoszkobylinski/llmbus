@@ -1,0 +1,44 @@
+# Apache Iggy broker for llmbus on the VPS (prod).
+#
+# Runs the SAME image + flags as the green CI integration job (apache/iggy:0.8.0):
+# the io_uring / thread-per-core server needs seccomp relaxed and CAP_SYS_NICE or it
+# will not start. Host port 8092 because 8090 (beziarnia) and 8091 (uvicorn) are
+# already taken on this box; bound to 127.0.0.1 only — the SDK is raw TCP on the
+# same host, nothing is proxied and nothing is public (ARCHITECTURE.md §9b).
+#
+# Start:   docker compose -f deploy/docker-compose.prod.yml up -d
+# Logs:    docker compose -f deploy/docker-compose.prod.yml logs -f
+# Stop:    docker compose -f deploy/docker-compose.prod.yml down   (data survives; named volume)
+#
+# Root credentials come from deploy/iggy.env (gitignored) — copy iggy.env.example
+# and set a real password. The worker's own .env must use the SAME IGGY_USERNAME /
+# IGGY_PASSWORD to log in.
+services:
+  iggy:
+    image: apache/iggy:0.8.0
+    container_name: llmbus-iggy
+    # host 127.0.0.1:8092 -> container TCP 8090 (the port the SDK speaks). HTTP/QUIC
+    # are not mapped: llmbus only needs TCP.
+    ports:
+      - "127.0.0.1:8092:8090"
+    environment:
+      # Bind 0.0.0.0 INSIDE the container (not Iggy's 127.0.0.1 default, which is the
+      # container's own loopback) so the host port-forward reaches it. The host side
+      # is still localhost-only via the 127.0.0.1 mapping above.
+      IGGY_TCP_ADDRESS: 0.0.0.0:8090
+    env_file:
+      # IGGY_ROOT_USERNAME / IGGY_ROOT_PASSWORD. 0.8.0 generates a RANDOM root
+      # password on first start unless these are set (applied only while the data
+      # volume is empty — delete the volume to reset creds).
+      - iggy.env
+    # Required for the io_uring / hwloc server — identical to the CI `options:`.
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_NICE
+    volumes:
+      - iggy-data:/local_data
+    restart: unless-stopped
+
+volumes:
+  iggy-data:

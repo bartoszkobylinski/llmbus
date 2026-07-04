@@ -142,24 +142,23 @@ Katalog: `~/Programming/Python/llmbus/`. Klient `llmbus` używany w innych repo 
 
 Cały stack projektów chodzi pod **systemd + nginx**, więc Iggy wpinamy tak samo — **bez Dockera na prod**.
 
-### Prod (VPS) — systemd
-- Serwer Iggy = **binarka z GitHub Releases** (nie kompilujesz Rusta), uruchamiana unitem systemd jak reszta usług.
-- `Restart=always`, `WorkingDirectory` na katalog loga, `EnvironmentFile` na credentiale.
-- **Port 8090 tylko na `localhost`** — projekty siedzą na tym samym VPS i gadają po `localhost:8090`. **nginx NIE jest w ścieżce** (SDK = surowy TCP, nie HTTP → nic nie proxujemy). Port nie musi być publiczny.
-```ini
-# /etc/systemd/system/iggy-server.service (szkic — flagi/ścieżki potwierdzić z docs)
-[Unit]
-Description=Apache Iggy server
-After=network.target
-[Service]
-ExecStart=/usr/local/bin/iggy-server
-WorkingDirectory=/var/lib/iggy
-EnvironmentFile=/etc/iggy/.env
-Restart=always
-RestartSec=2
-[Install]
-WantedBy=multi-user.target
-```
+### Prod (VPS `izabela213`) — zrealizowany deploy
+Artefakty i runbook: **`deploy/`** (`docker-compose.prod.yml`, `llmbus-worker.service`,
+`deploy.sh`, `README.md`). Ustalenia wobec pierwotnego szkicu (potwierdzone na maszynie):
+- **Iggy = kontener Docker** (`apache/iggy:0.8.0`, ten sam obraz + flagi co zielone CI:
+  `seccomp=unconfined` + `CAP_SYS_NICE` na io_uring), NIE binarka pod systemd. Powód:
+  na VPS Iggy jeszcze nie było, a box ma już Dockera i działające CI-Iggy — Docker
+  daje pinowanie wersji i zero ręcznej konfiguracji serwera. (Pierwotny plan „binarka
+  pod systemd" zostaje jako opcja, gdyby chcieć zejść z Dockera.)
+- **Port `127.0.0.1:8092`**, nie 8090 — 8090 zajęte przez `beziarnia` (gunicorn), 8091
+  przez uvicorn. Tylko `localhost`, tylko TCP; nginx poza ścieżką (SDK = surowy TCP).
+  `llmbus` `.env` → `IGGY_ADDRESS=127.0.0.1:8092`.
+- **Worker = `llmbus-worker.service`** w konwencji tego VPS-a (`User=bartek`, kod w
+  `~/Projects/llmbus`, `EnvironmentFile=.env`), `ExecStart` na `.venv/bin/python -m
+  llmbus.worker` (nie `uv run` — nie zgubić extra `worker`). `Restart=always` łata
+  wyścig „worker wstał przed brokerem" (redostawa bezpieczna, §6).
+- Root-creds brokera pinowane w `deploy/iggy.env` (gitignore); worker loguje się tymi
+  samymi `IGGY_USERNAME`/`IGGY_PASSWORD`.
 
 ### Dev (laptop, macOS) — WŁASNY lokalny Iggy, NIE prod
 - Do prac deweloperskich stawiasz **osobny, lokalny** serwer Iggy (na macu najszybciej **Docker**: `docker compose up -d`). **Nie łączysz się do Iggy na VPS.**

@@ -18,6 +18,7 @@ mutants/
 
 # Secrets & local data
 .env
+deploy/iggy.env
 *.db
 *.sqlite3
 local_data/

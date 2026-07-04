@@ -1,0 +1,33 @@
+# llmbus worker — central LLM job consumer (ARCHITECTURE.md §6).
+# Install:  sudo cp deploy/llmbus-worker.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now llmbus-worker
+# Matches the beziarnia/milamber convention on this VPS (User=bartek, code under
+# ~/Projects, EnvironmentFile=.env). Adjust the paths if you clone elsewhere.
+[Unit]
+Description=llmbus worker — central LLM job consumer
+Wants=network-online.target
+# Iggy runs as a Docker container (deploy/docker-compose.prod.yml), so want Docker up
+# first. The worker connects on start; if Iggy is not ready yet it exits and systemd
+# restarts it (Restart=always) — redelivery is safe via the store's one-shot finalize.
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+User=bartek
+Group=bartek
+WorkingDirectory=/home/bartek/Projects/llmbus
+# Secrets + config (§10). The worker also loads this via python-dotenv from the
+# WorkingDirectory, so the two agree; keep the file 0600.
+EnvironmentFile=/home/bartek/Projects/llmbus/.env
+# Run the in-project venv python directly (created by `uv sync --extra worker`).
+# NOT `uv run`: that would re-sync to the default extras on start and drop the
+# worker-only SDKs (openai/anthropic/httpx).
+ExecStart=/home/bartek/Projects/llmbus/.venv/bin/python -m llmbus.worker
+# main() traps SIGTERM -> asyncio shutdown, committing the in-flight message first.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
