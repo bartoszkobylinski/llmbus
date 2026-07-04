@@ -167,7 +167,16 @@ WantedBy=multi-user.target
 ## 11. Obserwowalność
 - **Audyt:** topic `llm-jobs` = log wszystkich promptów (replay).
 - **Koszt:** tabela w store per projekt/dzień.
-- **Lag/stats:** „ile jobów czeka" — SDK nie ma `get_stats`; v1 przybliża licząc w store; v2 = rozbudowa SDK.
+- **Lag/stats:** „ile jobów czeka" — SDK nie ma `get_stats`; v1 przybliża jako
+  `Store.pending_count()` (liczba wierszy `status='pending'`); v2 = rozbudowa SDK.
+- **Store (impl., PR `store`):** SQLite przez `aiosqlite` (async, bez sync-wrapperów na
+  pętli — każde wywołanie leci na wątku per-połączenie), tryb **WAL + `busy_timeout`**
+  (worker-pisarz + poller-czytelnik współlokowani, §9b — czytelnik nie blokuje jedynego
+  pisarza). Jeden wiersz na job keyowany `job_id`: `pending` → `ok`/`error`; `finalize`
+  jest one-shot (`WHERE status='pending'`) → idempotencja przy redostawie (§6). Wiersz
+  trzyma pola `Result` **plus** `project`/`model`/`submitted_at` (potrzebne do kosztu per
+  projekt/dzień, których `Result` nie niesie). Zapytanie agregujące koszt dołoży się przy
+  okablowaniu `cost.py` w PR `worker`.
 
 ## 12. Braki Iggy SDK, które tu uderzysz (nie blokują v1)
 - **nagłówki wiadomości** — metadane w headerach zamiast body.
@@ -181,10 +190,19 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
 1. Worker **generyczny + callback** (reużywalny bus, hate-mod robi resztę) vs **domenowy** (worker robi classify+hide, pełne odcięcie ale bus nie-generyczny). Wstępna rekomendacja: **generyczny + callback**.
 2. Rate-limit: tylko globalny w busie, czy zostawić też lokalny cap w hate-mod?
 3. Dystrybucja klienta `llmbus` do innych repo (editable / path / pip prywatny)?
-4. Results: `store + callback` wystarczy, czy chcesz też topic `llm-results`?
+4. ~~Results: `store + callback` wystarczy, czy chcesz też topic `llm-results`?~~
+   **ROZSTRZYGNIĘTE — `store + callback`, bez `llm-results` w v1.** Wyniki NIE wracają
+   przez Iggy (§5): worker zapisuje `Result` do store (SQLite), dostawa idzie callbackiem
+   (§3) i/lub pollingiem (#7). Osobny topic `llm-results` to scope wobec §1 — odłożony do
+   v2. Decyzja podjęta w PR `store`.
 5. ~~Iggy server: docker lokalnie → potem VPS?~~ **ROZSTRZYGNIĘTE (sekcja 9b):** prod = binarka pod systemd na VPS (port 8090 localhost, nginx poza ścieżką); dev = osobny lokalny Iggy (Docker na macu), nie łączymy się do prod. Jeden serwer na VPS dla wszystkich projektów.
 6. Model klasyfikacji dla hate-mod: który z rodziny GPT-5 (gpt-5-mini/nano) lub Anthropic? (OpenAI = GPT-5, nie 4o.)
-7. Sync (poll `await_result`) vs async (callback) — czy oba wspieramy w v1, czy tylko callback?
+7. ~~Sync (poll `await_result`) vs async (callback) — czy oba wspieramy w v1, czy tylko callback?~~
+   **ROZSTRZYGNIĘTE — oba w v1.** Callback to główna ścieżka (hate-mod, §3); poll
+   (`await_result(job_id)`) dokłada tanią ścieżkę dla batch/skryptów, bo czyta ten sam plik
+   store, który worker zapisuje (współlokacja, §9b). Mechanika: `submit()` wstawia wiersz
+   `pending`, worker `finalize` → terminal; `await_result` odpytuje store aż status będzie
+   terminalny. To samo `pending` daje przybliżenie lagu (§11). Decyzja podjęta w PR `store`.
 8. ~~Statyczne typowanie: wprowadzać type-checker do bramki merge?~~ **ROZSTRZYGNIĘTE:**
    `mypy --strict` nad `src/` to **obowiązkowa bramka merge** (0 błędów; testy wyłączone,
    analogicznie do ruff `tests/** = ANN`). To jedyne, co egzekwuje **semantyczną** stronę

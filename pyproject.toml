@@ -11,6 +11,9 @@ dependencies = [
     "pydantic>=2.7",
     "apache-iggy>=0.8",
     "python-dotenv>=1.0",
+    # Async SQLite results store (store.py). Core, not worker-only: producers that
+    # poll via client.await_result() read the same store, so submit/poll need it too.
+    "aiosqlite>=0.20",
 ]
 
 # The LLM SDKs are worker-side only: config.build_providers() constructs the real
@@ -112,7 +115,8 @@ source_paths = [
     "src/llmbus/providers/openai.py",
     "src/llmbus/providers/anthropic.py",
 ]
-# config.py is integration-touching (builds the SDK clients), so it is *not*
-# mutated — same exclusion as worker/store/client. But test_config.py imports it,
-# so copy the unmodified module into the mutants sandbox or collection would fail.
-also_copy = ["src/llmbus/config.py"]
+# config.py and store.py are integration/I/O-touching (SDK clients, SQLite), so
+# they are *not* mutated — same exclusion as worker/client. But their unit tests
+# import them, so copy the unmodified modules into the mutants sandbox or test
+# collection would fail.
+also_copy = ["src/llmbus/config.py", "src/llmbus/store.py"]
