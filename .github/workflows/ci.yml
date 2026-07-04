@@ -64,8 +64,12 @@ jobs:
         # Bind TCP to 0.0.0.0, not Iggy's default 127.0.0.1 (container loopback) —
         # otherwise Docker's port-forward can't reach the server. (Prod keeps
         # 127.0.0.1 on the VPS, §9b: localhost-only, no port-forward in the way.)
+        # 0.8.0 generates a RANDOM root password unless these are set on first
+        # startup (fresh container each run), so pin the creds the test logs in with.
         env:
           IGGY_TCP_ADDRESS: 0.0.0.0:8090
+          IGGY_ROOT_USERNAME: iggy
+          IGGY_ROOT_PASSWORD: iggy
         options: >-
           --security-opt seccomp=unconfined
           --cap-add SYS_NICE

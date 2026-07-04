@@ -23,6 +23,10 @@ services:
     # the CI Iggy or a Linux box; this compose is for Linux dev hosts.
     environment:
       IGGY_TCP_ADDRESS: 0.0.0.0:8090
+      # 0.8.0 generates a random root password on first start unless these are set
+      # (only applied when the data volume is empty; delete it to reset creds).
+      IGGY_ROOT_USERNAME: iggy
+      IGGY_ROOT_PASSWORD: iggy
     volumes:
       - iggy-data:/local_data
     restart: unless-stopped
