@@ -5,11 +5,11 @@
 # ~/Projects, EnvironmentFile=.env). Adjust the paths if you clone elsewhere.
 [Unit]
 Description=llmbus worker — central LLM job consumer
-Wants=network-online.target
-# Iggy runs as a Docker container (deploy/docker-compose.prod.yml), so want Docker up
-# first. The worker connects on start; if Iggy is not ready yet it exits and systemd
-# restarts it (Restart=always) — redelivery is safe via the store's one-shot finalize.
-After=network-online.target docker.service
+Wants=network-online.target iggy-server.service
+# Start after the Iggy broker (deploy/iggy-server.service). The worker connects on
+# start; if Iggy is not ready yet it exits and systemd restarts it (Restart=always) —
+# redelivery is safe via the store's one-shot finalize.
+After=network-online.target iggy-server.service
 
 [Service]
 Type=simple
