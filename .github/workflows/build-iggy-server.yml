@@ -1,0 +1,88 @@
+name: Build Iggy server
+
+# The VPS (izabela213) CANNOT compile this itself: 1 vCPU, ~800 MB free RAM, no swap
+# (LXC) — a Rust release link would OOM. No prebuilt iggy-server binary is published
+# either (the server-0.8.0 release has no assets). So we build it here and ship the
+# artifact to /usr/local/bin/iggy-server (deploy/README.md §1).
+#
+# Built inside an ubuntu:22.04 CONTAINER, not on the runner image: the binary must be
+# linked against glibc 2.35 to run on the VPS (Ubuntu 22.04). ubuntu-latest is 24.04
+# (glibc 2.39) and would produce a binary the box cannot load.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "apache/iggy tag to build"
+        required: true
+        default: server-0.8.0
+  # workflow_dispatch only works once this file is on the default branch, so also fire
+  # on pushes that touch this workflow — that is what builds it the first time.
+  push:
+    paths:
+      - .github/workflows/build-iggy-server.yml
+
+concurrency:
+  group: build-iggy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: iggy-server (linux x86_64, glibc 2.35)
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    env:
+      IGGY_TAG: ${{ inputs.tag || 'server-0.8.0' }}
+    steps:
+      - name: Build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git curl ca-certificates build-essential pkg-config \
+            libssl-dev libhwloc-dev libudev-dev
+
+      # Ubuntu 22.04 ships Node 12; the web UI is SvelteKit + Vite and needs 20+.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Clone apache/iggy at ${{ env.IGGY_TAG }}
+        run: git clone --depth 1 --branch "$IGGY_TAG" https://github.com/apache/iggy.git iggy
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # The server EMBEDS the web UI at compile time, so this must run before cargo
+      # (same order as Iggy's own Dockerfile). rustup picks 1.94.0 from rust-toolchain.toml.
+      - name: Build web UI (embedded by the server)
+        working-directory: iggy
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build:static
+
+      - name: Build iggy-server (release)
+        working-directory: iggy
+        run: cargo build --bin iggy-server --release
+
+      # Records exactly which shared libs the VPS must have installed (libssl3,
+      # libhwloc15, …) and pins the glibc floor. Read this in the run log before scp.
+      - name: Inspect binary
+        working-directory: iggy
+        run: |
+          ls -lh target/release/iggy-server
+          file target/release/iggy-server
+          echo "--- shared libs the VPS needs ---"
+          ldd target/release/iggy-server
+          echo "--- max glibc symbol required ---"
+          objdump -T target/release/iggy-server | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -3
+          sha256sum target/release/iggy-server | tee iggy-server.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iggy-server-${{ env.IGGY_TAG }}-linux-x86_64
+          path: |
+            iggy/target/release/iggy-server
+            iggy/iggy-server.sha256
+          if-no-files-found: error
+          retention-days: 14
