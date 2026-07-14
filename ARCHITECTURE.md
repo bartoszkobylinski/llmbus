@@ -142,19 +142,30 @@ Katalog: `~/Programming/Python/llmbus/`. Klient `llmbus` używany w innych repo 
 
 Cały stack projektów chodzi pod **systemd + nginx**, więc Iggy wpinamy tak samo — **bez Dockera na prod**.
 
-### Prod (VPS `izabela213`) — zrealizowany deploy (bez Dockera)
+### Prod (VPS `izabela213`) — plan wdrożenia (stan 2026-07-14: **jeszcze NIE postawione**)
 Artefakty i runbook: **`deploy/`** (`iggy-server.service`, `llmbus-worker.service`,
-`iggy.env.example`, `deploy.sh`, `README.md`). Ustalenia potwierdzone na maszynie:
-- **Iggy = binarka pod systemd, bez Dockera** (zgodnie z pierwotnym §9b). Ale
-  **0.8.0 nie ma prebuilt binarki** (release `server-0.8.0` bez assetów; Apache tylko
-  źródła; `cargo install iggy-server` nie istnieje) — więc **jednorazowy build ze
-  źródeł** z tagu `server-0.8.0`: `npm --prefix web build:static` (serwer osadza web UI —
-  tak robi oficjalny Dockerfile) → `cargo build --bin iggy-server --release` → kopiujesz
-  `target/release/iggy-server` do `/usr/local/bin`. Konfig przez env (`IGGY_*` nadpisuje
-  wbudowane defaulty; bez `config.toml`).
-- **Blocker kernela:** Iggy używa io_uring → **wymaga kernela ≥ 5.19**; Ubuntu 22.04
-  stockowo ma 5.15 → najpierw HWE (`linux-generic-hwe-22.04`, →6.x) i reboot. Dotyczy i
-  binarki, i Dockera (kontener używa kernela hosta).
+`iggy.env.example`, `deploy.sh`, `README.md`). Na maszynie nie ma jeszcze ani unitów, ani
+niczego na `:8092`. Ustalenia potwierdzone na maszynie (2026-07-14):
+- **Iggy = binarka pod systemd, bez Dockera** (zgodnie z pierwotnym §9b). **0.8.0 nie ma
+  prebuilt binarki** (release `server-0.8.0` bez assetów; Apache tylko źródła; brak crate'a
+  `iggy-server`) → build ze źródeł z tagu `server-0.8.0`, ale **NIE na VPS-ie**: box ma
+  1 vCPU, ~0.8 GB wolnego RAM i **zero swapu** (LXC) → link release'owy pada na OOM.
+  Buduje **GitHub Actions** (`.github/workflows/build-iggy-server.yml`) w kontenerze
+  `ubuntu:22.04` — glibc **2.35**, dokładnie to, co box; `ubuntu-latest` (24.04, glibc 2.39)
+  dałby binarkę, której box nie załaduje. Kolejność jak w oficjalnym Dockerfile:
+  `npm --prefix web run build:static` (serwer osadza web UI) → `cargo build --bin
+  iggy-server --release`. Artefakt → `scp` → `/usr/local/bin/iggy-server`. Konfig przez env
+  (`IGGY_*` nadpisuje wbudowane defaulty; bez `config.toml`).
+- **Kernel: NIE jest blockerem — i nie da się go zmienić od środka.** `izabela213` to
+  **kontener LXC** (`systemd-detect-virt` → `lxc`), więc jedzie na kernelu hosta Proxmox:
+  **7.0.12-1-pve**. `apt install linux-generic-hwe-22.04` w kontenerze to **no-op** — kernel
+  przychodzi z hosta (i pakiet nie jest tam nawet zainstalowany). Wymóg io_uring (≥ 5.19)
+  jest spełniony i **zweryfikowany bezpośrednio**: `kernel.io_uring_disabled=0`, a
+  `io_uring_setup(2)` wywołany wewnątrz kontenera zwraca deskryptor (nie blokuje go ani
+  AppArmor, ani seccomp LXC). Wcześniejsza notka „Ubuntu 22.04 = 5.15 → zrób HWE" była
+  **błędna dla LXC** — kernel podniósł się sam, gdy dostawca zmigrował CT na nowy host.
+- **Runtime libs:** binarka linkuje `libhwloc` — box **nie ma `libhwloc15`**
+  (`sudo apt install -y libhwloc15`). `libssl3` i `libudev1` już są.
 - Unit `iggy-server.service`: `User=bartek`, `AmbientCapabilities=CAP_SYS_NICE`,
   `LimitMEMLOCK=infinity`, **bez** `SystemCallFilter` (zablokowałby io_uring). Dane w
   `IGGY_SYSTEM_PATH=/var/lib/iggy`.

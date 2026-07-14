@@ -4,56 +4,67 @@ Runbook for `izabela213` (Ubuntu 22.04, user `bartek`). Deploys **the Iggy broke
 (from source, systemd) and **the worker**. The producer half (`client.py`) is a
 library other repos import — it has no service of its own.
 
-**Facts this is built on** (checked on the box, not assumed):
+**Facts this is built on** (verified on the box 2026-07-14, not assumed):
 
 | | |
 |---|---|
-| Iggy on the VPS | **none yet** — this stands it up |
-| Iggy runtime | **binary from source, under systemd** — no Docker (§9b). *No prebuilt 0.8.0 server binary exists* (empty GitHub release assets, source-only Apache downloads), so it's a one-time Rust build. |
-| Kernel | Iggy uses **io_uring → needs ≥ 5.19**. Ubuntu 22.04 stock is **5.15** — check first, bump via HWE if needed. |
+| Iggy on the VPS | **none yet** — this stands it up (no units, nothing on `:8092`) |
+| Iggy runtime | **binary under systemd** — no Docker (§9b). *No prebuilt 0.8.0 server binary exists* (empty GitHub release assets, source-only Apache downloads), so we build it — **in CI, not here** (see below). |
+| Kernel | **Nothing to do.** The box is an **LXC container** (`systemd-detect-virt` → `lxc`) on Proxmox host kernel **7.0.12-1-pve**, so it already clears Iggy's io_uring floor (≥ 5.19). io_uring is **verified working inside the container**: `kernel.io_uring_disabled=0` and a direct `io_uring_setup(2)` returns an fd. ⚠️ You **cannot** change the kernel from inside an LXC — `apt install linux-generic-hwe-*` is a no-op here. |
+| Box size | **1 vCPU, 4 GiB RAM (~0.8 GiB free), zero swap.** This is why the Rust build happens in CI: a release link would OOM. |
 | Iggy port | **127.0.0.1:8092** (8090 = beziarnia, 8091 = uvicorn already bound) |
+| Runtime libs | **`libhwloc15` is MISSING** — install it (below). `libssl3`, `libudev1` already present. glibc **2.35**. |
 | Service user / layout | `bartek`, code in `~/Projects/<name>`, `EnvironmentFile=.env` (matches beziarnia/milamber) |
 | uv | `~/.local/bin/uv` (manages Python 3.13 — no system python3.13 needed) |
-
-> This differs from §9b's original "prebuilt binary" sketch only in that 0.8.0 has no
-> prebuilt binary, so we **build it once** from the `server-0.8.0` tag. §9b updated.
+| sudo | prompts for a password — run the `sudo` blocks yourself |
 
 ---
 
-## 0. Kernel (do this first — gates everything)
+## 0. Kernel — already satisfied, skip
+
+Kept only to kill a wrong instruction that used to live here: *"Ubuntu 22.04 ships 5.15,
+install the HWE kernel and reboot."* That is **false for this box**. It is an LXC
+container — it runs the Proxmox **host's** kernel, and no package you install inside can
+change that. The kernel rose to 7.0.12-1-pve on its own when the provider migrated the
+container to a new host. Confirm and move on:
 
 ```bash
-uname -r
+uname -r                                  # 7.0.12-1-pve  (>= 5.19 -> io_uring OK)
+systemd-detect-virt                       # lxc
+cat /proc/sys/kernel/io_uring_disabled    # 0  (2 would mean io_uring is off -> STOP)
 ```
-If it's `5.15.x`, get the HWE (6.x) kernel and reboot; if already `6.x`, skip:
+
+## 1. Get the `iggy-server` binary (built in CI, not on the box)
+
+The VPS cannot compile it (1 vCPU, ~0.8 GB free, no swap → OOM at link time), and no
+prebuilt 0.8.0 binary is published. `.github/workflows/build-iggy-server.yml` builds it on
+a runner inside an **`ubuntu:22.04` container** — that container is what makes the binary
+loadable here: it links against **glibc 2.35**, the box's version. (`ubuntu-latest` is
+24.04/glibc 2.39; that binary would not start.) It builds the web UI before `cargo`,
+because the server embeds it.
+
+**On your laptop** — build, fetch, ship:
+
 ```bash
-sudo apt update && sudo apt install -y linux-generic-hwe-22.04 && sudo reboot
-# after reboot, confirm:  uname -r  ->  6.x
+cd ~/Programming/Python/llmbus
+gh workflow run build-iggy-server.yml -f tag=server-0.8.0
+RUN=$(gh run list --workflow=build-iggy-server.yml -L1 --json databaseId -q '.[0].databaseId')
+gh run watch "$RUN" --exit-status          # ~15-25 min; the log's "Inspect binary" step
+                                           # lists the exact libs the VPS needs
+gh run download "$RUN" -n iggy-server-server-0.8.0-linux-x86_64 -D /tmp/iggy-bin
+chmod +x /tmp/iggy-bin/target/release/iggy-server      # the artifact zip drops the exec bit
+scp /tmp/iggy-bin/target/release/iggy-server bartek@100.124.41.86:/tmp/iggy-server
 ```
 
-## 1. Build the Iggy server from source (one-time)
-
-No prebuilt 0.8.0 binary exists, so build it. The web UI must be built **before**
-`cargo build` — the server embeds it (this is what the official Iggy Dockerfile does).
+**On the VPS** — install it and prove it loads:
 
 ```bash
-sudo apt update
-sudo apt install -y git curl build-essential pkg-config libssl-dev libhwloc-dev \
-    libudev-dev nodejs npm ca-certificates
-
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-
-git clone https://github.com/apache/iggy.git ~/src/iggy
-cd ~/src/iggy
-git checkout server-0.8.0
-
-npm --prefix web ci
-npm --prefix web run build:static
-cargo build --bin iggy-server --release        # a few minutes; one-time
-
-sudo install -m 0755 target/release/iggy-server /usr/local/bin/iggy-server
+sudo apt update && sudo apt install -y libhwloc15        # Iggy links hwloc; not on the box
+sudo install -m 0755 /tmp/iggy-server /usr/local/bin/iggy-server
 sudo mkdir -p /var/lib/iggy && sudo chown bartek:bartek /var/lib/iggy
+
+ldd /usr/local/bin/iggy-server | grep -i "not found" && echo "MISSING LIBS ^^" \
+  || echo "all shared libs resolved"
 ```
 
 ## 2. Configure + start the broker
@@ -105,17 +116,22 @@ that's the correct "up" state. Jobs flow once `hate-moderator` calls `bus.submit
 
 - **Worker** (after a merge to main): `bash ~/Projects/llmbus/deploy/deploy.sh`
   (git pull + uv sync + restart worker). Iggy is untouched.
-- **Iggy** (only to change version): rebuild §1 at the new tag, `sudo install …`, then
+- **Iggy** (only to change version): re-run §1 with the new tag
+  (`gh workflow run build-iggy-server.yml -f tag=server-0.8.1`), `sudo install …`, then
   `sudo systemctl restart iggy-server`. Data in `/var/lib/iggy` persists.
 
 ## Troubleshooting
 
 - **Worker restart-loops, connect/login error** → Iggy isn't up or creds disagree.
   `systemctl status iggy-server`; check `.env` IGGY_USERNAME/PASSWORD == `deploy/iggy.env`.
-- **`iggy-server` exits immediately** → kernel < 5.19 (see §0), or the unit is missing
-  `AmbientCapabilities=CAP_SYS_NICE` / `LimitMEMLOCK=infinity`. `journalctl -u iggy-server`.
-- **`cargo build` fails on the web assets** → the `npm --prefix web …` steps didn't run
-  or failed; the server embeds that build.
+- **`iggy-server` exits immediately** → `journalctl -u iggy-server`. Not the kernel (§0 —
+  it's fine and you can't change it anyway). Likely: the unit lost
+  `AmbientCapabilities=CAP_SYS_NICE` / `LimitMEMLOCK=infinity`, or systemd could not grant
+  them in this LXC — if the log says the ambient caps failed, drop those two lines and
+  retry (Iggy only uses them to raise thread priority / lock memory).
+- **`error while loading shared libraries: libhwloc.so.15`** → `sudo apt install -y libhwloc15`.
+- **`GLIBC_2.3x not found`** → the binary was built on the wrong base. It must come from
+  the `ubuntu:22.04` container job (glibc 2.35), not a bare `ubuntu-latest` runner.
 - **`address already in use` on 8092** → pick another free port; update it in
   `deploy/iggy.env` (IGGY_TCP_ADDRESS) **and** the worker `.env` (IGGY_ADDRESS).
 - **Reset the broker (wipe jobs + creds)** → `sudo systemctl stop iggy-server && sudo
