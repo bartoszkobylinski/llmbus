@@ -183,9 +183,9 @@ niczego na `:8092`. Ustalenia potwierdzone na maszynie (2026-07-14):
 - **Dlaczego lokalnie, nie do VPS:**
   - **izolacja** — dev robi śmieciowe wiadomości, `delete topic`, restartuje workery, testuje replay. To NIE może dotknąć prod-loga, przez który lecą realne komentarze hate-moderatora.
   - **offline** — pracujesz bez VPS/sieci.
-  - **bezpieczeństwo** — nie musisz wystawiać portu 8090 VPS-a na świat (localhost-only na prod zostaje bezpieczne).
+  - **bezpieczeństwo** — nie musisz wystawiać portu brokera na VPS (`8092`) na świat (localhost-only na prod zostaje bezpieczne).
 - **Ten sam kod, inny serwer:** `llmbus` czyta `IGGY_ADDRESS` z `.env`. Dev `.env` → lokalny serwer; prod `.env` → serwer na VPS. Zero zmian w kodzie.
-- **Fallback** (gdybyś nie chciał Dockera na macu): SSH-tunnel `ssh -L 8090:localhost:8090 vps` — port zostaje prywatny. UWAGA: to celuje w **prod-dane**, więc tylko do podglądu, nie do testów niszczących. Rekomendacja: osobny lokalny serwer.
+- **Fallback** (gdybyś nie chciał Dockera na macu): SSH-tunnel `ssh -L 8090:127.0.0.1:8092 izabela213` — **zdalna strona to 8092** (broker), lokalna 8090, więc dev-owy `IGGY_ADDRESS=127.0.0.1:8090` działa bez zmian. Na VPS-ie 8090 to `beziarnia`/gunicorn, **nie** Iggy — stary wariant `-L 8090:localhost:8090` celował w cudzy serwis. Port zostaje prywatny. UWAGA: to celuje w **prod-dane**, więc tylko do podglądu, nie do testów niszczących. Rekomendacja: osobny lokalny serwer.
 
 **Zasada:** dwa osobne serwery, dwa osobne logi — standardowe rozdzielenie dev/prod.
 
@@ -231,7 +231,7 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    przez Iggy (§5): worker zapisuje `Result` do store (SQLite), dostawa idzie callbackiem
    (§3) i/lub pollingiem (#7). Osobny topic `llm-results` to scope wobec §1 — odłożony do
    v2. Decyzja podjęta w PR `store`.
-5. ~~Iggy server: docker lokalnie → potem VPS?~~ **ROZSTRZYGNIĘTE (sekcja 9b):** prod = binarka pod systemd na VPS (port 8090 localhost, nginx poza ścieżką); dev = osobny lokalny Iggy (Docker na macu), nie łączymy się do prod. Jeden serwer na VPS dla wszystkich projektów.
+5. ~~Iggy server: docker lokalnie → potem VPS?~~ **ROZSTRZYGNIĘTE (sekcja 9b):** prod = binarka pod systemd na VPS (**`127.0.0.1:8092`** — nie 8090, które na tym boxie zajmuje `beziarnia`/gunicorn; nginx poza ścieżką); dev = osobny lokalny Iggy (Docker na macu, `8090`), nie łączymy się do prod. Jeden serwer na VPS dla wszystkich projektów.
 6. Model klasyfikacji dla hate-mod: który z rodziny GPT-5 (gpt-5-mini/nano) lub Anthropic? (OpenAI = GPT-5, nie 4o.)
 7. ~~Sync (poll `await_result`) vs async (callback) — czy oba wspieramy w v1, czy tylko callback?~~
    **ROZSTRZYGNIĘTE — oba w v1.** Callback to główna ścieżka (hate-mod, §3); poll
