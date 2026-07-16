@@ -132,4 +132,13 @@ also_copy = [
     "src/llmbus/store.py",
     "src/llmbus/worker.py",
     "src/llmbus/client.py",
+    # Same reason, one directory up: deploy/smoke.py is a deploy script, never
+    # mutated, but tests/unit/test_deploy_smoke.py loads it by path (it is not an
+    # importable package), so the sandbox needs the file or collection errors out.
+    # The DIRECTORY, not the file: mutmut copy2's a file straight to
+    # mutants/<path> without creating parents, so "deploy/smoke.py" raises
+    # FileNotFoundError (the src/llmbus/ entries above only work because mutating
+    # source_paths creates that tree first). A directory goes through copytree,
+    # which does create it.
+    "deploy",
 ]
