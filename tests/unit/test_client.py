@@ -17,7 +17,6 @@ from llmbus.client import (
     DEFAULT_POLL_INTERVAL_S,
     DEFAULT_RESULT_TIMEOUT_S,
     BusClient,
-    IggyLogin,
     encode_job,
     poll_result,
     result_from_stored,
@@ -115,7 +114,6 @@ def make_client(store, iggy=None, **overrides):
     kwargs = {
         "iggy": iggy if iggy is not None else FakeIggyClient(),
         "store": store,
-        "login": IggyLogin("iggy", "secret"),
     }
     kwargs.update(overrides)
     return BusClient(**kwargs)
@@ -361,7 +359,11 @@ async def test_await_result_times_out_on_a_pending_job():
 # --- BusClient lifecycle -----------------------------------------------------
 
 
-async def test_connect_opens_store_logs_in_and_ensures_topology():
+async def test_connect_opens_store_and_ensures_topology_without_logging_in():
+    # No login_user: the connection-string client authenticates inside connect(), and
+    # a manual login would leave auto_login Disabled — the §14 #16 bug that made the
+    # SDK's own reconnect come back unauthenticated. `logins` staying empty is the
+    # regression guard on the producer side.
     iggy = FakeIggyClient(stream=None, topic=None)  # nothing exists yet
     store = Store(":memory:")
     bus = make_client(store, iggy)
@@ -369,7 +371,7 @@ async def test_connect_opens_store_logs_in_and_ensures_topology():
     await bus.connect()
     try:
         assert iggy.connected is True
-        assert iggy.logins == [("iggy", "secret")]
+        assert iggy.logins == []
         assert iggy.created_streams == [DEFAULT_TOPOLOGY.stream]
         assert iggy.created_topics == [
             (DEFAULT_TOPOLOGY.stream, DEFAULT_TOPOLOGY.topic, DEFAULT_TOPOLOGY.partitions)

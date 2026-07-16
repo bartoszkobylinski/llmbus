@@ -30,6 +30,7 @@ from apache_iggy import (  # noqa: E402
     SendMessage,
 )
 
+from llmbus.config import iggy_connection_string  # noqa: E402
 from llmbus.processing import WorkerDeps  # noqa: E402
 from llmbus.providers.base import ProviderResult  # noqa: E402
 from llmbus.retry import RetryPolicy, WorkerPolicy  # noqa: E402
@@ -45,16 +46,18 @@ _PASS = os.environ.get("IGGY_PASSWORD", "iggy")
 
 
 async def _connect_or_skip() -> IggyClient:
-    # Retry the full connect+login handshake: a freshly-started broker binds its TCP
-    # port before it is protocol-ready, so a cold connect gets 'Disconnected'. Each
-    # attempt is bounded (the Rust client would otherwise retry a truly-down broker
-    # for a long time) with a fresh client, since a failed one may be poisoned.
+    # Retry the connect: a freshly-started broker binds its TCP port before it is
+    # protocol-ready, so a cold connect gets 'Disconnected'. Each attempt is bounded
+    # (the Rust client would otherwise retry a truly-down broker for a long time) with
+    # a fresh client, since a failed one may be poisoned.
     last_exc: BaseException | None = None
     for _ in range(20):
-        client = IggyClient(_ADDR)
+        # from_connection_string, not IggyClient(addr)+login_user: only this form sets
+        # the SDK's auto_login, so connect() authenticates and the SDK re-authenticates
+        # on its own internal reconnects (§14 #16). Mirrors production exactly.
+        client = IggyClient.from_connection_string(iggy_connection_string(_ADDR, _USER, _PASS))
         try:
             await asyncio.wait_for(client.connect(), timeout=3)
-            await asyncio.wait_for(client.login_user(_USER, _PASS), timeout=3)
             return client
         except (Exception, asyncio.TimeoutError) as exc:  # noqa: BLE001 - retry any handshake failure
             last_exc = exc

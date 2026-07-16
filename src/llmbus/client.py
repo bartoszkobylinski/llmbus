@@ -28,26 +28,15 @@ import asyncio
 import logging
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
 
 from apache_iggy import IggyClient, SendMessage
 
-from llmbus.config import Config, load_config
+from llmbus.config import Config, iggy_connection_string, load_config
 from llmbus.schema import Job, Result
 from llmbus.store import Store, StoredJob
 from llmbus.worker import DEFAULT_TOPOLOGY, Topology, ensure_topology
 
 _log = logging.getLogger("llmbus.client")
-
-
-@dataclass(frozen=True)
-class IggyLogin:
-    """The producer's Iggy credentials (§10). Bundled so `BusClient` takes its two
-    backends (Iggy, store) plus one login, like the codebase's other frozen config
-    dataclasses — and so `connect()` has one place to read them from."""
-
-    username: str
-    password: str
 
 
 # The v1 topic has a single partition; the SDK indexes partitions from 0, so the
@@ -148,23 +137,31 @@ class BusClient:
         *,
         iggy: IggyClient,
         store: Store,
-        login: IggyLogin,
         topology: Topology = DEFAULT_TOPOLOGY,
     ) -> None:
         self._iggy = iggy
         self._store = store
-        self._login = login
         self._topology = topology
 
     @classmethod
     def from_config(cls, config: Config, *, topology: Topology = DEFAULT_TOPOLOGY) -> BusClient:
         """Build a client from a resolved `Config`: the shared Iggy address/creds and
         the store path (§10). Constructs the SDK client and store offline — neither
-        connects until `connect()`."""
+        connects until `connect()`.
+
+        The Iggy client is built **from a connection string**, never `IggyClient(addr)`
+        + a manual `login_user`: only the connection-string form authenticates inside
+        `connect()`, and therefore also on the SDK's internal reconnects. See
+        `config.iggy_connection_string` for why the manual form is not reconnect-safe
+        (§14 #16). Credentials therefore live in the client, not on `BusClient`.
+        """
         return cls(
-            iggy=IggyClient(config.iggy_address),
+            iggy=IggyClient.from_connection_string(
+                iggy_connection_string(
+                    config.iggy_address, config.iggy_username, config.iggy_password
+                )
+            ),
             store=Store(config.db_path),
-            login=IggyLogin(config.iggy_username, config.iggy_password),
             topology=topology,
         )
 
@@ -178,7 +175,11 @@ class BusClient:
         return cls.from_config(load_config(env), topology=topology)
 
     async def connect(self) -> None:
-        """Open the store + Iggy connection, log in, and ensure the topology exists.
+        """Open the store + Iggy connection and ensure the topology exists.
+
+        No `login_user` call: the connection-string client authenticates inside
+        `connect()` (§14 #16), and doing it by hand would leave `auto_login` Disabled —
+        the bug that crashed the worker with `Unauthenticated` after a reconnect.
 
         Idempotent topology creation (§5) means a producer that races ahead of the
         worker still finds the topic to send to — it does not depend on the worker
@@ -186,7 +187,6 @@ class BusClient:
         """
         await self._store.connect()
         await self._iggy.connect()
-        await self._iggy.login_user(self._login.username, self._login.password)
         await ensure_topology(self._iggy, self._topology)
 
     async def close(self) -> None:

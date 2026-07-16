@@ -23,6 +23,18 @@ before adding anything.
   HTTP 3000, QUIC 8080. Root creds `iggy`/`iggy`.
 - **NEVER point dev code at the prod VPS Iggy** (§9b) — dev uses its own local server via
   `IGGY_ADDRESS` in `.env`.
+- **ALWAYS build the client with `IggyClient.from_connection_string("iggy+tcp://user:pass@host:port")`,
+  never `IggyClient(addr)` + `login_user()`** (§14 #16). Auth is **per TCP session**, and every
+  command goes through the SDK's `send_raw_with_response`, which on a transient error — *and on
+  `Unauthenticated` itself* — silently does `disconnect()` → `connect()` → retry. Only the
+  connection-string form sets `auto_login`, so only it re-authenticates on that reconnect; the
+  manual form comes back unauthenticated and **cannot self-heal**. This cost an evening of prod
+  debugging: it looks fine (login succeeds), then dies on a later command. Percent-encode the
+  credentials. Note the SDK's **own** primary test fixture (`foreign/python/tests/conftest.py`)
+  uses the unsafe manual form, so do not treat their examples as a guide here — their tests are
+  short-lived against a fresh server and never reconnect. That footgun is worth reporting
+  upstream (with the `leader_aware.rs` swallow that hides it, §14 #16), but our fix does not
+  depend on them.
 - Known SDK gaps this project hits: no **message headers** (→ metadata goes in the JSON
   body, §4) and no **get_stats** (→ lag approximated from the store, §11). Both are planned
   upstream contributions — use the documented workarounds, don't hack the binding locally.

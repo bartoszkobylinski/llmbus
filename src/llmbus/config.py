@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -188,6 +189,35 @@ def parse_worker_policy(env: Mapping[str, str]) -> WorkerPolicy:
         job_timeout_s=_positive_float(env, "WORKER_JOB_TIMEOUT_S"),
         default_output_tokens=_positive_int(env, "WORKER_DEFAULT_OUTPUT_TOKENS"),
     )
+
+
+def iggy_connection_string(address: str, username: str, password: str) -> str:
+    """The SDK connection string for `IggyClient.from_connection_string` (§9b, §14 #16).
+
+    **This is the only correct way to build our client, and it is not cosmetic.**
+    `IggyClient(address)` leaves the SDK's `auto_login` **Disabled**, so `connect()`
+    never authenticates and the credentials must be passed by hand to `login_user`.
+    That is not reconnect-safe: every command goes through the SDK's
+    `send_raw_with_response`, which on a transient error (and on `Unauthenticated`
+    itself) does `disconnect()` → `connect()` → retry. With `auto_login` Disabled that
+    reconnect silently re-establishes an **unauthenticated** session, because the SDK
+    holds no credentials to replay — and since Iggy authenticates per TCP session,
+    every later command fails `Unauthenticated` and cannot self-heal.
+
+    The connection string form sets `auto_login: Enabled(UsernamePassword)`, so the SDK
+    logs in inside `connect()` — including on every internal reconnect. Verified
+    against the live broker: `IggyClient(addr).connect()` then `get_stream()` raises
+    `Unauthenticated`, while the same sequence via `from_connection_string` succeeds.
+
+    Credentials are percent-encoded: they are user-supplied `.env` values, and a `:`,
+    `@` or `/` in a password would otherwise reshape the URL and be parsed as another
+    field entirely.
+
+    Takes the three values rather than a `Config` so the integration suite — which has
+    an address and credentials but no full `Config` — builds its clients through this
+    same function, and therefore exercises the production path.
+    """
+    return f"iggy+tcp://{quote(username, safe='')}:{quote(password, safe='')}@{address}"
 
 
 def parse_connect_policy(env: Mapping[str, str]) -> RetryPolicy:

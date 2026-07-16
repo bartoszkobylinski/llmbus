@@ -42,6 +42,7 @@ from pydantic import ValidationError
 from llmbus.config import (
     Config,
     build_providers,
+    iggy_connection_string,
     parse_config,
     parse_connect_policy,
     parse_worker_policy,
@@ -86,9 +87,10 @@ def decode_job(payload: bytes) -> Job:
     return Job.model_validate_json(payload)
 
 
-# Builds a *fresh* IggyClient. Injected (like config.py's SDK `ClientFactory`) so
-# `connect_and_login` can throw away a poisoned client between attempts, and so
-# unit tests drive the handshake with a fake instead of a live broker.
+# Builds a *fresh*, connection-string-configured IggyClient (so `connect()` also
+# authenticates — see config.iggy_connection_string). Injected (like config.py's SDK
+# `ClientFactory`) so `connect_broker` can throw away a poisoned client between
+# attempts, and so unit tests drive the handshake with a fake, not a live broker.
 IggyClientFactory = Callable[[], IggyClient]
 
 
@@ -106,33 +108,32 @@ class BackoffEffects:
     rand: Callable[[], float] = random.random
 
 
-async def connect_and_login(
+async def connect_broker(
     make_client: IggyClientFactory,
-    config: Config,
     policy: RetryPolicy,
     effects: BackoffEffects = BackoffEffects(),
 ) -> IggyClient:
-    """Connect to the broker and log in, retrying with jittered backoff (§6, §14 #16).
+    """Connect to the broker, retrying with jittered backoff (§6, §14 #16).
 
-    Retries **any** exception rather than consulting `is_retryable`. Two reasons.
-    First, it would not work: the binding surfaces a broker that is up but not yet
-    protocol-ready as a bare `RuntimeError("Disconnected")` — no `status_code`, no
-    SDK class name — which `is_retryable` correctly calls terminal, and teaching
-    that shared classifier about broker errors would widen §14 #12's provider-only
-    scope onto the job path. Second, it is pointless: the unit sets
-    `Restart=always`, so *every* handshake failure already ends in a retry, just
-    via a process restart. Retrying in-process reaches the same end state without
-    a traceback in the journal or the 5s `RestartSec` gap.
+    There is deliberately no `login_user` call here. `make_client` builds a
+    connection-string client (`config.iggy_connection_string`), so the SDK owns
+    authentication and performs it *inside* `connect()` — on the first connect and on
+    every internal reconnect. Logging in by hand is what made the worker crash with
+    `Unauthenticated` after the SDK silently reconnected (§14 #16); do not add it back.
 
-    Each attempt builds a **fresh** client — a failed handshake can leave the
-    previous one poisoned (the integration suite's `_connect_or_skip` helper
-    learned this the same way). Once `policy.max_attempts` is spent the last error
-    is re-raised and systemd takes over exactly as it does today, so a genuinely
-    misconfigured worker (bad password) still fails loudly instead of spinning.
+    Retries **any** exception rather than consulting `is_retryable`, which is scoped to
+    provider errors (§14 #12) and would call a broker `RuntimeError` terminal. It costs
+    nothing to be broad here: the unit sets `Restart=always`, so every failure already
+    ends in a retry via a process restart — this just reaches the same state without a
+    traceback in the journal or the 5s `RestartSec` gap. Exhausting `policy.max_attempts`
+    re-raises, so a misconfigured worker (bad password) still fails loudly.
 
-    Not addressed here: an attempt is not individually timed out, so a truly
-    unreachable broker can block inside the Rust client instead of cycling through
-    attempts. That is the pre-existing behaviour and needs its own timeout knob.
+    Each attempt builds a **fresh** client: a failed connect can leave the previous one
+    poisoned (the integration suite's `_connect_or_skip` learned this the same way).
+
+    Not addressed here: an attempt is not individually timed out, so a truly unreachable
+    broker can block inside the Rust client instead of cycling attempts. That is
+    pre-existing and needs its own timeout knob.
     """
     attempt = 0
     # `while True` for the same reason as processing._call_with_retry: both exits
@@ -142,13 +143,12 @@ async def connect_and_login(
         client = make_client()
         try:
             await client.connect()
-            await client.login_user(config.iggy_username, config.iggy_password)
             return client
-        except Exception as exc:  # noqa: BLE001 - any handshake failure earns a bounded retry
+        except Exception as exc:  # noqa: BLE001 - any connect failure earns a bounded retry
             if attempt + 1 >= policy.max_attempts:
                 raise
             _log.warning(
-                "broker handshake failed (attempt %d/%d): %s — retrying",
+                "broker connect failed (attempt %d/%d): %s — retrying",
                 attempt + 1,
                 policy.max_attempts,
                 exc,
@@ -243,8 +243,13 @@ async def run_worker(
     shutdown = shutdown if shutdown is not None else asyncio.Event()
     try:
         await store.connect()
-        client = await connect_and_login(
-            lambda: IggyClient(config.iggy_address), config, connect_policy
+        client = await connect_broker(
+            lambda: IggyClient.from_connection_string(
+                iggy_connection_string(
+                    config.iggy_address, config.iggy_username, config.iggy_password
+                )
+            ),
+            connect_policy,
         )
         await ensure_topology(client, topology)
 

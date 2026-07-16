@@ -15,6 +15,7 @@ from llmbus.config import (
     _provider_limits,
     _require,
     build_providers,
+    iggy_connection_string,
     load_config,
     parse_config,
 )
@@ -317,3 +318,61 @@ def test_build_providers_registry_covers_every_routed_provider():
 def test_build_providers_adapters_satisfy_provider_protocol():
     for provider in _providers_with_fakes().values():
         assert isinstance(provider, Provider)
+
+
+# --- iggy_connection_string (§14 #16) ----------------------------------------
+#
+# Why this function exists at all: IggyClient(address) leaves the SDK's auto_login
+# Disabled, so connect() does not authenticate and the SDK's internal reconnect
+# (send_raw_with_response -> disconnect -> connect -> retry) silently comes back on an
+# UNAUTHENTICATED session. The connection-string form sets auto_login Enabled, so the
+# SDK re-authenticates on every reconnect. Verified against the live broker.
+
+
+def _conn(config):
+    return iggy_connection_string(config.iggy_address, config.iggy_username, config.iggy_password)
+
+
+def _cfg(**overrides):
+    data = {
+        "openai_api_key": "sk-o",
+        "anthropic_api_key": "sk-a",
+        "rate_limits": {},
+        "iggy_address": "127.0.0.1:8092",
+        "iggy_username": "iggy",
+        "iggy_password": "secret",
+        "db_path": "llmbus.db",
+    }
+    data.update(overrides)
+    return Config(**data)
+
+
+def test_connection_string_carries_credentials_and_address():
+    assert _conn(_cfg()) == "iggy+tcp://iggy:secret@127.0.0.1:8092"
+
+
+def test_connection_string_uses_the_tcp_protocol_scheme():
+    # The SDK rejects a connection string whose protocol is not tcp (from_connection_string
+    # -> parse_protocol != Tcp -> InvalidConnectionString), and our broker is TCP-only (§9b).
+    assert _conn(_cfg()).startswith("iggy+tcp://")
+
+
+@pytest.mark.parametrize(
+    ("password", "encoded"),
+    [
+        ("p@ss", "p%40ss"),  # @ would otherwise start the host part
+        ("p:ss", "p%3Ass"),  # : would otherwise split user/password
+        ("p/ss", "p%2Fss"),  # / would otherwise start the path
+        ("p ss", "p%20ss"),
+        ("pąss", "p%C4%85ss"),  # non-ascii must not land raw in a URL
+    ],
+)
+def test_connection_string_percent_encodes_the_password(password, encoded):
+    # Credentials are user-supplied .env values. An unescaped @/:// would reshape the
+    # URL and the SDK would parse a different host or user entirely — silently
+    # connecting somewhere else or failing with an opaque error.
+    assert _conn(_cfg(iggy_password=password)) == (f"iggy+tcp://iggy:{encoded}@127.0.0.1:8092")
+
+
+def test_connection_string_percent_encodes_the_username():
+    assert _conn(_cfg(iggy_username="a@b")) == ("iggy+tcp://a%40b:secret@127.0.0.1:8092")

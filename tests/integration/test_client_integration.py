@@ -29,7 +29,8 @@ from apache_iggy import (  # noqa: E402
     PollingStrategy,
 )
 
-from llmbus.client import BusClient, IggyLogin  # noqa: E402
+from llmbus.client import BusClient  # noqa: E402
+from llmbus.config import iggy_connection_string  # noqa: E402
 from llmbus.processing import WorkerDeps  # noqa: E402
 from llmbus.providers.base import ProviderResult  # noqa: E402
 from llmbus.retry import RetryPolicy, WorkerPolicy  # noqa: E402
@@ -46,14 +47,16 @@ _PASS = os.environ.get("IGGY_PASSWORD", "iggy")
 
 async def _connect_or_skip() -> IggyClient:
     # A freshly-started broker binds its TCP port before it is protocol-ready, so a
-    # cold connect gets 'Disconnected'; retry the bounded handshake with a fresh
-    # client each attempt. (Same helper the worker integration test uses.)
+    # cold connect gets 'Disconnected'; retry the bounded connect with a fresh client
+    # each attempt. (Same helper the worker integration test uses.)
     last_exc: BaseException | None = None
     for _ in range(20):
-        client = IggyClient(_ADDR)
+        # from_connection_string, not IggyClient(addr)+login_user: only this form sets
+        # the SDK's auto_login, so connect() authenticates and the SDK re-authenticates
+        # on its own internal reconnects (§14 #16). Mirrors production exactly.
+        client = IggyClient.from_connection_string(iggy_connection_string(_ADDR, _USER, _PASS))
         try:
             await asyncio.wait_for(client.connect(), timeout=3)
-            await asyncio.wait_for(client.login_user(_USER, _PASS), timeout=3)
             return client
         except (Exception, asyncio.TimeoutError) as exc:  # noqa: BLE001 - retry any handshake failure
             last_exc = exc
@@ -140,7 +143,6 @@ async def test_submit_consume_await_round_trip(tmp_path):
         bus = BusClient(
             iggy=client,
             store=store,
-            login=IggyLogin(_USER, _PASS),
             topology=topology,
         )
 

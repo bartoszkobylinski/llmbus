@@ -95,7 +95,7 @@ w PR `worker-loop` z testami integracyjnymi. `process_job(deps, job)` to rdzeń;
 
 - **rate-limit:** token-bucket per provider (OpenAI i Anthropic osobno; req/min + tok/min). Globalny — to jest cała idea busa. Rezerwacja jest **przed** wywołaniem (inaczej 429), więc worker estymuje tokeny z góry (§14 #13): `sum(len(content))//4` po wiadomościach (input, heurystyka ~4 znaki/token) + `max_tokens` joba, a gdy nie ustawiono — `WORKER_DEFAULT_OUTPUT_TOKENS`. Kubełek sam się koryguje w kolejnym cyklu, więc dokładność nie jest krytyczna. Rezerwacja leci **przed każdą próbą** (retry to kolejny realny request do providera).
 - **retry/backoff (§14 #11):** na transient failures (429/408/409, każde 5xx, timeout, zerwane połączenie) z **exponential backoff + full jitter**: opóźnienie retry `i` (0-based) = `min(WORKER_BACKOFF_MAX_S, WORKER_BACKOFF_BASE_S * 2**i) * random()`. Łącznie `WORKER_MAX_ATTEMPTS` prób (wliczając pierwszą; `4` = 1 + 3 retry). Po wyczerpaniu → `Result{status:"error"}` do store + log (v1 „dead-letter"; osobny topic dead-letter w v2, §13). Klasyfikacja transient/terminal (`retry.is_retryable`, §14 #12) **duck-typuje** wyjątek — status HTTP + `TimeoutError`/`ConnectionError` + nazwy klas `APIConnectionError`/`APITimeoutError` — **bez importu SDK**, więc decyzja retry siedzi w bramce mutacyjnej (adaptery też nie importują SDK, §7; kontrakt providera bez zmian).
-- **handshake z brokerem (§14 #16):** `connect_and_login` ponawia `connect`+`login_user` z tym samym backoffem, ale **własną** polityką (`WORKER_CONNECT_*`), osobną od retry jobów: zimny broker chce wielu krótkich prób, płatne wywołanie modelu — kilku długich. Ponawia **każdy** wyjątek, nie `is_retryable`: binding oddaje „broker wstał, ale nie jest jeszcze protocol-ready" jako gołe `RuntimeError("Disconnected")` (bez `status_code`, bez nazwy klasy SDK), które `is_retryable` słusznie uznaje za terminalne — a rozszerzanie tego wspólnego klasyfikatora (§14 #12: tylko błędy providera) o błędy brokera przeciekłoby na ścieżkę jobów. Każda próba dostaje **świeżego klienta** (nieudany handshake potrafi zatruć poprzedniego). Po wyczerpaniu prób → wyjątek leci dalej i proces kończy się jak dotąd (systemd `Restart=always` wznawia), więc źle skonfigurowany worker (złe hasło) nadal pada głośno. **Nie objęte:** pojedyncza próba nie ma własnego timeoutu — nieosiągalny broker może blokować wewnątrz klienta Rust zamiast cyklować próby (zachowanie sprzed zmiany; własna gałka `WORKER_CONNECT_TIMEOUT_S` → osobny PR).
+- **połączenie z brokerem (§14 #16):** klient budujemy **wyłącznie** przez `IggyClient.from_connection_string(iggy_connection_string(...))` — `iggy+tcp://user:pass@host:port`, poświadczenia percent-encoded. To ustawia SDK-owe `auto_login`, więc **`connect()` uwierzytelnia**, także przy każdym wewnętrznym reconnectcie SDK (`send_raw_with_response` → `disconnect` → `connect` → retry). Ręczny `login_user` na `IggyClient(addr)` zostawia `auto_login: Disabled` → reconnect wraca nieuwierzytelniony → `RuntimeError: Unauthenticated` bez samonaprawy. **Nie dodawać `login_user` z powrotem.** `connect_broker` dokłada tylko ponawianie **samego connectu** (własna polityka `WORKER_CONNECT_*`, osobna od retry jobów — zimny broker chce wielu krótkich prób, płatne wywołanie modelu kilku długich; §14 #11 dostroiło tamte pod joby). Ponawia **każdy** wyjątek, nie `is_retryable` (ten jest zakresowo tylko o błędach providera, §14 #12, i uznałby błąd brokera za terminalny). Każda próba dostaje **świeżego klienta** (nieudany connect potrafi zatruć poprzedniego). Po wyczerpaniu prób wyjątek leci dalej → proces pada → systemd `Restart=always` wznawia, więc złe hasło nadal pada głośno. **Nie objęte:** pojedyncza próba nie ma własnego timeoutu (zachowanie sprzed zmiany; `WORKER_CONNECT_TIMEOUT_S` → osobny PR).
 - **provider routing:** po nazwie `model` → OpenAI albo Anthropic (`provider_for`); nieznany model / brak adaptera w rejestrze → `Result{status:"error"}`, żeby jeden zły job nie zatrzymał pętli.
 - **timeout (§14 #11):** **per próba** (`WORKER_JOB_TIMEOUT_S`), przez wstrzyknięty runner (domyślnie `asyncio.wait_for`) — timeout wypada jako `TimeoutError` (transient → retry). Wstrzyknięcie runnera zamiast zegara ściennego trzyma `process_job` w bramce mutacyjnej bez realnego czasu, jak wstrzykiwany `sleep`/`clock` w `ratelimit`.
 - **koszt:** z usage, per `project` → tabela kosztów (podstawa budżetu). Cennik jest **datowany** (`cost.py`: każdy model ma historię cen z datą wejścia w życie) — koszt liczony po stawce obowiązującej w dniu `submitted_at`, więc zaplanowane zmiany (np. koniec ceny promo Sonnet 5 dnia 2026-09-01) rozwiązują się same, bez ręcznej edycji i bez pobierania cen z sieci. `Decimal` z `cost.py` schodzi do `float` dopiero na granicy `Result.usage.cost_usd`. (Zapytanie agregujące per projekt/dzień dołoży się w PR `worker-loop`.)
@@ -310,29 +310,50 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    halt workera (jedna zła wiadomość kładzie cały bus) i retry/park (nieskończona
    redostawa tej samej trucizny — zawiesza jedynego workera). Trwały dead-letter
    (persist raw) → v2 (§13), bo v1 nie ma dead-letter topicu.
-16. ~~**Retry handshake'u z brokerem: budżet prób i klasyfikacja błędu.**~~
-   **ROZSTRZYGNIĘTE (PR `worker-connect-retry`) — osobne `WORKER_CONNECT_*` +
-   ponawiaj każdy wyjątek.** Zaobserwowane na prodzie 2026-07-16: po `systemctl
-   restart llmbus-worker` pierwszy `login_user` dostał `RuntimeError:
-   Disconnected`, proces padł, systemd wznowił go 8 s później (worker wstał zdrowy,
-   smoke `OK: 'pong'` — objaw kosmetyczny, ale zaśmieca journal i psuje sygnał „czy
-   worker jest zepsuty"). **Powód, dla którego nie da się użyć istniejącej
-   maszynerii:** `is_retryable(RuntimeError("Disconnected"))` → **False** (binding
-   PyO3 oddaje błędy Rusta jako gołe `RuntimeError` — bez `status_code`, bez nazwy
-   klasy SDK), więc opakowanie handshake'u w politykę jobów nie ponowiłoby *niczego*.
-   **(a) Budżet:** nowe klucze `WORKER_CONNECT_MAX_ATTEMPTS=10` /
-   `WORKER_CONNECT_BACKOFF_BASE_S=0.25` / `WORKER_CONNECT_BACKOFF_MAX_S=5` zamiast
-   reużycia `WORKER_*` — inne domeny awarii (zimny broker vs płatne 429), a §14 #11
-   dostroiło tamte wartości pod ścieżkę jobów; wspólna polityka znaczyłaby, że
-   strojenie jednej cicho stroi drugą. **(b) Klasyfikacja:** pętla ponawia **każdy**
-   wyjątek zamiast uczyć `is_retryable` o błędach brokera — to poszerzyłoby zakres
-   §14 #12 (tylko błędy providera, w bramce mutacyjnej) na ścieżkę jobów, gdzie
-   `RuntimeError` z naszego kodu wyglądałby nagle na transient. Jest też bez
-   znaczenia: unit ma `Restart=always`, więc każda porażka handshake'u i tak kończy
-   się retry — tyle że przez restart procesu. Retry in-process daje ten sam stan
-   końcowy bez tracebacku i bez 5 s `RestartSec`. Wyczerpanie prób nadal rzuca →
-   proces pada → systemd wznawia (bez zmiany dla złego hasła). Świeży klient na
-   próbę: nieudany handshake potrafi zatruć poprzedniego (tak samo robi
-   `_connect_or_skip` w suite integracyjnym). **Odłożone:** timeout pojedynczej
-   próby (`WORKER_CONNECT_TIMEOUT_S`) — dziś nieosiągalny broker blokuje w kliencie
-   Rust; to zachowanie sprzed zmiany, więc osobny PR.
+16. ~~**`Unauthenticated`/`Disconnected` przy starcie workera: jak budować klienta Iggy.**~~
+   **ROZSTRZYGNIĘTE (PR `iggy-connection-string`) — `IggyClient.from_connection_string`,
+   NIGDY `IggyClient(addr)` + ręczny `login_user`.** Auth w Iggy jest **per sesja TCP**.
+   Każda komenda idzie przez SDK-owe `send_raw_with_response`, które po błędzie
+   przejściowym — **oraz po samym `Unauthenticated`** — robi `disconnect()` → `connect()`
+   → retry. Przy `IggyClient(addr)` SDK ma `auto_login: Disabled`, więc **`connect()` nie
+   uwierzytelnia** (loguje „Automatic sign-in is disabled"), a my logujemy się ręcznie —
+   ten reconnect wraca więc na sesji **nieuwierzytelnionej**, bo SDK nie ma poświadczeń do
+   odtworzenia. Efekt: `RuntimeError: Unauthenticated` na pierwszej komendzie po
+   reconnectcie, bez szans na samonaprawę (Unauthenticated → reconnect → znów
+   Unauthenticated). Connection string ustawia `auto_login: Enabled(UsernamePassword)`, więc
+   SDK loguje się **wewnątrz `connect()`** — także przy każdym swoim reconnectcie.
+   **Dowody (2026-07-16/17):** (1) na żywym brokerze `IggyClient(addr).connect()` →
+   `get_stream()` = `Unauthenticated`, a `from_connection_string(...).connect()` →
+   `get_stream()` = OK, bez żadnego `login_user` w obu przypadkach; (2) log brokera: „Logged
+   in user: iggy" na sesji A, „unauthenticated access attempt" na sesji B; (3) 5-sekundowa
+   luka między logowaniem a krachem = `reconnection.reestablish_after` (default 5 s), które
+   `connect()` odczekuje; (4) źródło `apache_iggy` 0.8.0 (sdist, sha256 zgodny z `uv.lock`):
+   `tcp_client.rs` `send_raw_with_response` + gałąź `AutoLogin::Disabled`,
+   `connection_string.rs` → `AutoLogin::Enabled(Credentials::UsernamePassword)`.
+   **Czyj to błąd — uczciwie:** naprawa jest po **naszej** stronie i nie zależy od Iggy
+   (dowód (1) jest samowystarczalny). Ale **nie** dlatego, że „trzymaliśmy SDK niezgodnie z
+   ich przykładami" — to twierdzenie było **fałszywe** i zostało stąd usunięte: ich
+   **główna** fikstura testowa (`foreign/python/tests/conftest.py:55`) używa dokładnie
+   naszego, ręcznego wariantu (`IggyClient(addr)` + `login_user`); connection string pojawia
+   się u nich w teście *samego konstruktora*, w testach TLS (gdzie jest jedyną opcją) i w
+   teście **negatywnym**. Ich testy tego nie łapią, bo są krótkie, na świeżym serwerze i
+   nigdy nie reconnectują. **Do zgłoszenia upstream (dwie rzeczy, nie blokują nas):**
+   (a) ręczny `login_user` + auto-reconnect **po cichu** gubi uwierzytelnienie — kanoniczny
+   wariant z ich własnej fikstury nie jest reconnect-safe; (b) `leader_aware.rs` **połyka**
+   błąd `get_cluster_metadata` (`warn!` + `Ok(None)`), więc `login_user()` zwraca `Ok` na
+   sesji, która właśnie odpowiedziała `Unauthenticated` — to ukrywa (a), ale go nie powoduje. Hasło/użytkownik są **percent-encoded** (`:`/`@`/`/` w haśle przemodelowałyby
+   URL). **Wcześniejsza diagnoza w tym #16 była BŁĘDNA** i została tu zastąpiona: mówiła, że
+   sedno to `is_retryable(RuntimeError("Disconnected")) == False` i że lekiem jest retry
+   handshake'u; retry **nie wystarcza** (Python widzi `connect`+`login` jako sukces, więc
+   nigdy się nie odpala) — zostaje wyłącznie na **zimny broker**. Nie powielać tamtej
+   historii.
+   **(a) Budżet retry connectu:** osobne `WORKER_CONNECT_MAX_ATTEMPTS=10` /
+   `WORKER_CONNECT_BACKOFF_BASE_S=0.25` / `WORKER_CONNECT_BACKOFF_MAX_S=5` zamiast reużycia
+   `WORKER_*` — inne domeny awarii (zimny broker vs płatne 429), a §14 #11 dostroiło tamte
+   pod ścieżkę jobów; wspólna polityka znaczyłaby, że strojenie jednej cicho stroi drugą.
+   **(b) Klasyfikacja:** `connect_broker` ponawia **każdy** wyjątek zamiast uczyć
+   `is_retryable` o błędach brokera — to poszerzyłoby zakres §14 #12 (tylko błędy providera,
+   w bramce mutacyjnej) na ścieżkę jobów. Świeży klient na próbę: nieudany connect potrafi
+   zatruć poprzedniego (tak samo robi `_connect_or_skip` w suite integracyjnym).
+   **Odłożone:** timeout pojedynczej próby (`WORKER_CONNECT_TIMEOUT_S`) — dziś nieosiągalny
+   broker blokuje w kliencie Rust; zachowanie sprzed zmiany, więc osobny PR.
