@@ -190,6 +190,28 @@ def parse_worker_policy(env: Mapping[str, str]) -> WorkerPolicy:
     )
 
 
+def parse_connect_policy(env: Mapping[str, str]) -> RetryPolicy:
+    """Parse the broker-handshake retry policy (`WORKER_CONNECT_*`, §6, §14 #16).
+
+    Deliberately a *separate* `RetryPolicy` from `parse_worker_policy`'s per-job
+    one, not a reuse: a cold or flaky broker wants many short attempts, while a
+    paid provider call wants few long ones (§14 #11 tuned those values for the job
+    path specifically). Sharing one policy would mean retuning either path
+    silently retunes the other.
+
+    Worker-only and pure over an injected mapping, exactly like the job policy;
+    `RetryPolicy`'s cross-field rule (max >= base) is re-raised as `ConfigError`
+    so a bad `.env` fails uniformly.
+    """
+    max_attempts = _positive_int(env, "WORKER_CONNECT_MAX_ATTEMPTS")
+    base_delay_s = _positive_float(env, "WORKER_CONNECT_BACKOFF_BASE_S")
+    max_delay_s = _positive_float(env, "WORKER_CONNECT_BACKOFF_MAX_S")
+    try:
+        return RetryPolicy(max_attempts, base_delay_s, max_delay_s)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
 # A factory that turns an API key into an SDK client. Injected into
 # `build_providers` so tests pass fakes and the real SDK import stays lazy.
 ClientFactory = Callable[[str], Any]

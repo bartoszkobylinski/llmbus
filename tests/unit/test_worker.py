@@ -11,16 +11,19 @@ mutation gate but still owes coverage.
 import pytest
 from pydantic import ValidationError
 
+from llmbus.config import Config
 from llmbus.processing import WorkerDeps
 from llmbus.providers.base import ProviderResult
-from llmbus.retry import RetryPolicy, WorkerPolicy
+from llmbus.retry import RetryPolicy, WorkerPolicy, is_retryable
 from llmbus.schema import Job, JobParams, Message, Usage
 from llmbus.store import Store
 from llmbus.worker import (
     DEFAULT_TOPOLOGY,
+    BackoffEffects,
     Topology,
     _consume_one,
     _load,
+    connect_and_login,
     decode_job,
     ensure_topology,
     make_callback_sender,
@@ -73,6 +76,50 @@ class FakeMessage:
         return self._offset
 
 
+class _HandshakeClient:
+    """One handshake attempt. Raises `error` at `fail_at` ('connect'|'login'), else
+    succeeds; records what it was asked to do so a test can prove which stage ran."""
+
+    def __init__(self, error=None, fail_at="login"):
+        self._error = error
+        self._fail_at = fail_at
+        self.connect_calls = 0
+        self.login_calls = 0
+        self.credentials = None
+
+    async def connect(self):
+        self.connect_calls += 1
+        if self._error is not None and self._fail_at == "connect":
+            raise self._error
+
+    async def login_user(self, username, password):
+        self.login_calls += 1
+        self.credentials = (username, password)
+        if self._error is not None and self._fail_at == "login":
+            raise self._error
+
+
+class _HandshakeFactory:
+    """Hands out one pre-scripted client per attempt and keeps every client it built.
+
+    `errors[i]` is the failure for attempt i (None = that attempt succeeds); past
+    the end of the list, attempts succeed. `self.clients` is what lets a test assert
+    the retry builds a FRESH client each time rather than reusing a poisoned one.
+    """
+
+    def __init__(self, errors, *, fail_at="login"):
+        self._errors = list(errors)
+        self._fail_at = fail_at
+        self.clients = []
+
+    def __call__(self):
+        index = len(self.clients)
+        error = self._errors[index] if index < len(self._errors) else None
+        client = _HandshakeClient(error, self._fail_at)
+        self.clients.append(client)
+        return client
+
+
 class FakeIggyClient:
     """Records topology calls; get_* return what the test pre-seeds (or None)."""
 
@@ -109,6 +156,36 @@ def make_job(**overrides):
     }
     data.update(overrides)
     return Job(**data)
+
+
+def make_config(**overrides):
+    data = {
+        "openai_api_key": "sk-o",
+        "anthropic_api_key": "sk-a",
+        "rate_limits": {},
+        "iggy_address": "127.0.0.1:8090",
+        "iggy_username": "iggy-user",
+        "iggy_password": "iggy-pass",
+        "db_path": "worker.db",
+    }
+    data.update(overrides)
+    return Config(**data)
+
+
+def connect_policy(max_attempts=3, base_delay_s=0.25, max_delay_s=5.0):
+    return RetryPolicy(
+        max_attempts=max_attempts, base_delay_s=base_delay_s, max_delay_s=max_delay_s
+    )
+
+
+class _RecordingSleep:
+    """Async sleep that records every delay instead of passing real time."""
+
+    def __init__(self):
+        self.delays = []
+
+    async def __call__(self, delay):
+        self.delays.append(delay)
 
 
 def build_deps(store, provider):
@@ -285,6 +362,140 @@ async def test_consume_one_truncates_poison_payload_in_log(caplog):
         assert repr(payload) not in caplog.text
 
 
+# --- connect_and_login -------------------------------------------------------
+#
+# The broker handshake retry (§6, §14 #16). Observed on prod 2026-07-16: the first
+# login after a worker restart raised RuntimeError("Disconnected"), the process
+# died, and systemd restarted it 8s later. These pin the in-process retry that
+# replaces that crash — including the reason it cannot lean on `is_retryable`.
+
+
+async def test_connect_and_login_returns_the_client_on_a_clean_handshake():
+    factory = _HandshakeFactory([])
+    sleep = _RecordingSleep()
+
+    client = await connect_and_login(
+        factory, make_config(), connect_policy(), BackoffEffects(sleep=sleep, rand=lambda: 1.0)
+    )
+
+    assert client is factory.clients[0]
+    assert len(factory.clients) == 1
+    assert client.connect_calls == 1
+    assert client.credentials == ("iggy-user", "iggy-pass")
+    assert sleep.delays == []
+
+
+async def test_connect_and_login_retries_the_iggy_disconnected_runtime_error():
+    # The exact production failure. `is_retryable` calls this terminal (it is a bare
+    # RuntimeError — no status_code, no SDK class name), which is precisely why the
+    # handshake retries ANY exception instead of consulting it. If someone later
+    # routes this through `is_retryable`, this test fails.
+    assert not is_retryable(RuntimeError("Disconnected"))
+    factory = _HandshakeFactory([RuntimeError("Disconnected")])
+    sleep = _RecordingSleep()
+
+    client = await connect_and_login(
+        factory, make_config(), connect_policy(), BackoffEffects(sleep=sleep, rand=lambda: 1.0)
+    )
+
+    assert client is factory.clients[1]
+    assert len(sleep.delays) == 1
+
+
+async def test_connect_and_login_builds_a_fresh_client_for_every_attempt():
+    # A failed handshake can leave the client poisoned, so a retry must not reuse
+    # it. Each attempt gets its own client, and only the last one is logged in.
+    factory = _HandshakeFactory([RuntimeError("Disconnected"), RuntimeError("Disconnected")])
+
+    client = await connect_and_login(
+        factory,
+        make_config(),
+        connect_policy(),
+        BackoffEffects(sleep=_RecordingSleep(), rand=lambda: 1.0),
+    )
+
+    assert len(factory.clients) == 3
+    assert client is factory.clients[2]
+    assert [c.connect_calls for c in factory.clients] == [1, 1, 1]
+
+
+async def test_connect_and_login_retries_a_failure_at_the_connect_stage_too():
+    factory = _HandshakeFactory([ConnectionError("refused")], fail_at="connect")
+
+    client = await connect_and_login(
+        factory,
+        make_config(),
+        connect_policy(),
+        BackoffEffects(sleep=_RecordingSleep(), rand=lambda: 1.0),
+    )
+
+    assert client is factory.clients[1]
+    assert factory.clients[0].login_calls == 0  # never got past connect
+
+
+async def test_connect_and_login_reraises_the_last_error_once_attempts_are_spent():
+    # Exhaustion must still exit: a genuinely misconfigured worker (bad password)
+    # fails loudly and lets systemd take over, exactly as before this change.
+    last = RuntimeError("still down")
+    factory = _HandshakeFactory([RuntimeError("down"), RuntimeError("down"), last])
+    sleep = _RecordingSleep()
+
+    with pytest.raises(RuntimeError, match="still down"):
+        await connect_and_login(
+            factory,
+            make_config(),
+            connect_policy(max_attempts=3),
+            BackoffEffects(sleep=sleep, rand=lambda: 1.0),
+        )
+
+    assert len(factory.clients) == 3  # exactly max_attempts, no more
+    assert len(sleep.delays) == 2  # no sleep after the final failure
+
+
+async def test_connect_and_login_backs_off_exponentially_with_injected_jitter():
+    factory = _HandshakeFactory([RuntimeError("x"), RuntimeError("x"), RuntimeError("x")])
+    sleep = _RecordingSleep()
+
+    await connect_and_login(
+        factory,
+        make_config(),
+        connect_policy(max_attempts=5, base_delay_s=0.25, max_delay_s=5.0),
+        BackoffEffects(sleep=sleep, rand=lambda: 1.0),  # rand=1.0 -> uncapped ceiling
+    )
+
+    assert sleep.delays == [0.25, 0.5, 1.0]
+
+
+async def test_connect_and_login_caps_backoff_at_max_delay():
+    factory = _HandshakeFactory([RuntimeError("x")] * 4)
+    sleep = _RecordingSleep()
+
+    await connect_and_login(
+        factory,
+        make_config(),
+        connect_policy(max_attempts=6, base_delay_s=1.0, max_delay_s=2.0),
+        BackoffEffects(sleep=sleep, rand=lambda: 1.0),
+    )
+
+    assert sleep.delays == [1.0, 2.0, 2.0, 2.0]  # 4.0 and 8.0 clamped to the cap
+
+
+async def test_connect_and_login_single_attempt_policy_does_not_retry():
+    factory = _HandshakeFactory([RuntimeError("nope")])
+    sleep = _RecordingSleep()
+
+    with pytest.raises(RuntimeError, match="nope"):
+        await connect_and_login(
+            factory,
+            make_config(),
+            connect_policy(max_attempts=1),
+            BackoffEffects(sleep=sleep, rand=lambda: 1.0),
+        )
+
+    assert len(factory.clients) == 1
+    assert sleep.delays == []
+
+
 # --- _load -------------------------------------------------------------------
 
 
@@ -305,10 +516,18 @@ def test_load_parses_config_and_worker_policy():
         "WORKER_BACKOFF_MAX_S": "30",
         "WORKER_JOB_TIMEOUT_S": "60",
         "WORKER_DEFAULT_OUTPUT_TOKENS": "512",
+        "WORKER_CONNECT_MAX_ATTEMPTS": "10",
+        "WORKER_CONNECT_BACKOFF_BASE_S": "0.25",
+        "WORKER_CONNECT_BACKOFF_MAX_S": "5",
     }
-    config, policy = _load(env)
+    config, policy, connect = _load(env)
     assert config.db_path == "worker.db"
     assert config.iggy_address == "127.0.0.1:8090"
     assert policy.retry.max_attempts == 4
     assert policy.job_timeout_s == 60
     assert policy.default_output_tokens == 512
+    # The handshake policy is parsed separately and stays independent of the job
+    # retry above (§14 #16) — retuning one must not silently retune the other.
+    assert connect.max_attempts == 10
+    assert connect.base_delay_s == 0.25
+    assert connect.max_delay_s == 5

@@ -25,8 +25,9 @@ import asyncio
 import dataclasses
 import logging
 import os
+import random
 import signal
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from apache_iggy import (
@@ -38,10 +39,16 @@ from apache_iggy import (
 )
 from pydantic import ValidationError
 
-from llmbus.config import Config, build_providers, parse_config, parse_worker_policy
+from llmbus.config import (
+    Config,
+    build_providers,
+    parse_config,
+    parse_connect_policy,
+    parse_worker_policy,
+)
 from llmbus.processing import CallbackSender, WorkerDeps, process_job
 from llmbus.ratelimit import RateLimiter
-from llmbus.retry import WorkerPolicy
+from llmbus.retry import RetryPolicy, WorkerPolicy, backoff_delay
 from llmbus.schema import Job
 from llmbus.store import Store
 
@@ -77,6 +84,77 @@ def decode_job(payload: bytes) -> Job:
     that into a dropped poison message rather than a wedged partition.
     """
     return Job.model_validate_json(payload)
+
+
+# Builds a *fresh* IggyClient. Injected (like config.py's SDK `ClientFactory`) so
+# `connect_and_login` can throw away a poisoned client between attempts, and so
+# unit tests drive the handshake with a fake instead of a live broker.
+IggyClientFactory = Callable[[], IggyClient]
+
+
+@dataclasses.dataclass(frozen=True)
+class BackoffEffects:
+    """The two effects a backoff loop needs, injected as one bundle.
+
+    Same pattern and reason as `processing.WorkerDeps`: the real clock and RNG are
+    the defaults, tests override them so no real time passes and the jitter is
+    deterministic. Bundled rather than passed as two more parameters to keep the
+    call signature inside the repo's argument budget (ruff PLR0913).
+    """
+
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    rand: Callable[[], float] = random.random
+
+
+async def connect_and_login(
+    make_client: IggyClientFactory,
+    config: Config,
+    policy: RetryPolicy,
+    effects: BackoffEffects = BackoffEffects(),
+) -> IggyClient:
+    """Connect to the broker and log in, retrying with jittered backoff (§6, §14 #16).
+
+    Retries **any** exception rather than consulting `is_retryable`. Two reasons.
+    First, it would not work: the binding surfaces a broker that is up but not yet
+    protocol-ready as a bare `RuntimeError("Disconnected")` — no `status_code`, no
+    SDK class name — which `is_retryable` correctly calls terminal, and teaching
+    that shared classifier about broker errors would widen §14 #12's provider-only
+    scope onto the job path. Second, it is pointless: the unit sets
+    `Restart=always`, so *every* handshake failure already ends in a retry, just
+    via a process restart. Retrying in-process reaches the same end state without
+    a traceback in the journal or the 5s `RestartSec` gap.
+
+    Each attempt builds a **fresh** client — a failed handshake can leave the
+    previous one poisoned (the integration suite's `_connect_or_skip` helper
+    learned this the same way). Once `policy.max_attempts` is spent the last error
+    is re-raised and systemd takes over exactly as it does today, so a genuinely
+    misconfigured worker (bad password) still fails loudly instead of spinning.
+
+    Not addressed here: an attempt is not individually timed out, so a truly
+    unreachable broker can block inside the Rust client instead of cycling through
+    attempts. That is the pre-existing behaviour and needs its own timeout knob.
+    """
+    attempt = 0
+    # `while True` for the same reason as processing._call_with_retry: both exits
+    # are explicit, leaving no unreachable post-loop line. `attempt` strictly
+    # increases and the guard bounds it, so this terminates.
+    while True:
+        client = make_client()
+        try:
+            await client.connect()
+            await client.login_user(config.iggy_username, config.iggy_password)
+            return client
+        except Exception as exc:  # noqa: BLE001 - any handshake failure earns a bounded retry
+            if attempt + 1 >= policy.max_attempts:
+                raise
+            _log.warning(
+                "broker handshake failed (attempt %d/%d): %s — retrying",
+                attempt + 1,
+                policy.max_attempts,
+                exc,
+            )
+            await effects.sleep(backoff_delay(attempt, policy, effects.rand()))
+            attempt += 1
 
 
 async def ensure_topology(client: IggyClient, topology: Topology = DEFAULT_TOPOLOGY) -> None:
@@ -131,15 +209,16 @@ async def _consume_one(deps: WorkerDeps, message: ReceiveMessage) -> None:
     await process_job(deps, job)
 
 
-def _load(env: Mapping[str, str] | None) -> tuple[Config, WorkerPolicy]:
-    """Resolve the environment (real `.env` when `env is None`) and parse both the
-    shared `Config` and the worker-only `WorkerPolicy` from it."""
+def _load(env: Mapping[str, str] | None) -> tuple[Config, WorkerPolicy, RetryPolicy]:
+    """Resolve the environment (real `.env` when `env is None`) and parse the
+    shared `Config`, the worker-only `WorkerPolicy`, and the broker-handshake
+    `RetryPolicy` (§14 #16) from it."""
     if env is None:  # pragma: no cover - real .env path, only hit from run_worker
         from dotenv import load_dotenv
 
         load_dotenv()
         env = os.environ
-    return parse_config(env), parse_worker_policy(env)
+    return parse_config(env), parse_worker_policy(env), parse_connect_policy(env)
 
 
 async def run_worker(
@@ -155,18 +234,18 @@ async def run_worker(
     are torn down in `finally` so a shutdown (SIGINT/SIGTERM via `main`) closes the
     store connection and the httpx client cleanly.
     """
-    config, policy = _load(env)
+    config, policy, connect_policy = _load(env)
 
     import httpx
 
     http_client = httpx.AsyncClient(timeout=policy.job_timeout_s)
     store = Store(config.db_path)
-    client = IggyClient(config.iggy_address)
     shutdown = shutdown if shutdown is not None else asyncio.Event()
     try:
         await store.connect()
-        await client.connect()
-        await client.login_user(config.iggy_username, config.iggy_password)
+        client = await connect_and_login(
+            lambda: IggyClient(config.iggy_address), config, connect_policy
+        )
         await ensure_topology(client, topology)
 
         deps = WorkerDeps(

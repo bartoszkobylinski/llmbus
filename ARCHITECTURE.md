@@ -95,6 +95,7 @@ w PR `worker-loop` z testami integracyjnymi. `process_job(deps, job)` to rdzeń;
 
 - **rate-limit:** token-bucket per provider (OpenAI i Anthropic osobno; req/min + tok/min). Globalny — to jest cała idea busa. Rezerwacja jest **przed** wywołaniem (inaczej 429), więc worker estymuje tokeny z góry (§14 #13): `sum(len(content))//4` po wiadomościach (input, heurystyka ~4 znaki/token) + `max_tokens` joba, a gdy nie ustawiono — `WORKER_DEFAULT_OUTPUT_TOKENS`. Kubełek sam się koryguje w kolejnym cyklu, więc dokładność nie jest krytyczna. Rezerwacja leci **przed każdą próbą** (retry to kolejny realny request do providera).
 - **retry/backoff (§14 #11):** na transient failures (429/408/409, każde 5xx, timeout, zerwane połączenie) z **exponential backoff + full jitter**: opóźnienie retry `i` (0-based) = `min(WORKER_BACKOFF_MAX_S, WORKER_BACKOFF_BASE_S * 2**i) * random()`. Łącznie `WORKER_MAX_ATTEMPTS` prób (wliczając pierwszą; `4` = 1 + 3 retry). Po wyczerpaniu → `Result{status:"error"}` do store + log (v1 „dead-letter"; osobny topic dead-letter w v2, §13). Klasyfikacja transient/terminal (`retry.is_retryable`, §14 #12) **duck-typuje** wyjątek — status HTTP + `TimeoutError`/`ConnectionError` + nazwy klas `APIConnectionError`/`APITimeoutError` — **bez importu SDK**, więc decyzja retry siedzi w bramce mutacyjnej (adaptery też nie importują SDK, §7; kontrakt providera bez zmian).
+- **handshake z brokerem (§14 #16):** `connect_and_login` ponawia `connect`+`login_user` z tym samym backoffem, ale **własną** polityką (`WORKER_CONNECT_*`), osobną od retry jobów: zimny broker chce wielu krótkich prób, płatne wywołanie modelu — kilku długich. Ponawia **każdy** wyjątek, nie `is_retryable`: binding oddaje „broker wstał, ale nie jest jeszcze protocol-ready" jako gołe `RuntimeError("Disconnected")` (bez `status_code`, bez nazwy klasy SDK), które `is_retryable` słusznie uznaje za terminalne — a rozszerzanie tego wspólnego klasyfikatora (§14 #12: tylko błędy providera) o błędy brokera przeciekłoby na ścieżkę jobów. Każda próba dostaje **świeżego klienta** (nieudany handshake potrafi zatruć poprzedniego). Po wyczerpaniu prób → wyjątek leci dalej i proces kończy się jak dotąd (systemd `Restart=always` wznawia), więc źle skonfigurowany worker (złe hasło) nadal pada głośno. **Nie objęte:** pojedyncza próba nie ma własnego timeoutu — nieosiągalny broker może blokować wewnątrz klienta Rust zamiast cyklować próby (zachowanie sprzed zmiany; własna gałka `WORKER_CONNECT_TIMEOUT_S` → osobny PR).
 - **provider routing:** po nazwie `model` → OpenAI albo Anthropic (`provider_for`); nieznany model / brak adaptera w rejestrze → `Result{status:"error"}`, żeby jeden zły job nie zatrzymał pętli.
 - **timeout (§14 #11):** **per próba** (`WORKER_JOB_TIMEOUT_S`), przez wstrzyknięty runner (domyślnie `asyncio.wait_for`) — timeout wypada jako `TimeoutError` (transient → retry). Wstrzyknięcie runnera zamiast zegara ściennego trzyma `process_job` w bramce mutacyjnej bez realnego czasu, jak wstrzykiwany `sleep`/`clock` w `ratelimit`.
 - **koszt:** z usage, per `project` → tabela kosztów (podstawa budżetu). Cennik jest **datowany** (`cost.py`: każdy model ma historię cen z datą wejścia w życie) — koszt liczony po stawce obowiązującej w dniu `submitted_at`, więc zaplanowane zmiany (np. koniec ceny promo Sonnet 5 dnia 2026-09-01) rozwiązują się same, bez ręcznej edycji i bez pobierania cen z sieci. `Decimal` z `cost.py` schodzi do `float` dopiero na granicy `Result.usage.cost_usd`. (Zapytanie agregujące per projekt/dzień dołoży się w PR `worker-loop`.)
@@ -190,7 +191,7 @@ niczego na `:8092`. Ustalenia potwierdzone na maszynie (2026-07-14):
 **Zasada:** dwa osobne serwery, dwa osobne logi — standardowe rozdzielenie dev/prod.
 
 ## 10. Konfiguracja i sekrety
-`.env`: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `IGGY_ADDRESS`/`IGGY_USERNAME`/`IGGY_PASSWORD`, `STORE_PATH` (plik SQLite — pisany przez workera, czytany pollem przez producenta, §9b), limity (req/min, tok/min per provider), polityka workera (`WORKER_*`, §6/§14 #11) i budżety per projekt. Nic hardcoded (python-dotenv). `Config` (współdzielony producent+worker) niesie klucze/Iggy/`db_path`; `WorkerPolicy` (`parse_worker_policy`) parsuje `WORKER_*` osobno, bo producent ich nie potrzebuje.
+`.env`: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `IGGY_ADDRESS`/`IGGY_USERNAME`/`IGGY_PASSWORD`, `STORE_PATH` (plik SQLite — pisany przez workera, czytany pollem przez producenta, §9b), limity (req/min, tok/min per provider), polityka workera (`WORKER_*`, §6/§14 #11), polityka handshake'u z brokerem (`WORKER_CONNECT_*`, §6/§14 #16) i budżety per projekt. Nic hardcoded (python-dotenv). `Config` (współdzielony producent+worker) niesie klucze/Iggy/`db_path`; `WorkerPolicy` (`parse_worker_policy`) parsuje `WORKER_*` osobno, bo producent ich nie potrzebuje, a `parse_connect_policy` — `WORKER_CONNECT_*` jako **osobną** `RetryPolicy` (nie pole `WorkerPolicy`: ta jest per-job, handshake jest startupowy; §14 #16).
 
 ## 11. Obserwowalność
 - **Audyt:** topic `llm-jobs` = log wszystkich promptów (replay).
@@ -309,3 +310,29 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    halt workera (jedna zła wiadomość kładzie cały bus) i retry/park (nieskończona
    redostawa tej samej trucizny — zawiesza jedynego workera). Trwały dead-letter
    (persist raw) → v2 (§13), bo v1 nie ma dead-letter topicu.
+16. ~~**Retry handshake'u z brokerem: budżet prób i klasyfikacja błędu.**~~
+   **ROZSTRZYGNIĘTE (PR `worker-connect-retry`) — osobne `WORKER_CONNECT_*` +
+   ponawiaj każdy wyjątek.** Zaobserwowane na prodzie 2026-07-16: po `systemctl
+   restart llmbus-worker` pierwszy `login_user` dostał `RuntimeError:
+   Disconnected`, proces padł, systemd wznowił go 8 s później (worker wstał zdrowy,
+   smoke `OK: 'pong'` — objaw kosmetyczny, ale zaśmieca journal i psuje sygnał „czy
+   worker jest zepsuty"). **Powód, dla którego nie da się użyć istniejącej
+   maszynerii:** `is_retryable(RuntimeError("Disconnected"))` → **False** (binding
+   PyO3 oddaje błędy Rusta jako gołe `RuntimeError` — bez `status_code`, bez nazwy
+   klasy SDK), więc opakowanie handshake'u w politykę jobów nie ponowiłoby *niczego*.
+   **(a) Budżet:** nowe klucze `WORKER_CONNECT_MAX_ATTEMPTS=10` /
+   `WORKER_CONNECT_BACKOFF_BASE_S=0.25` / `WORKER_CONNECT_BACKOFF_MAX_S=5` zamiast
+   reużycia `WORKER_*` — inne domeny awarii (zimny broker vs płatne 429), a §14 #11
+   dostroiło tamte wartości pod ścieżkę jobów; wspólna polityka znaczyłaby, że
+   strojenie jednej cicho stroi drugą. **(b) Klasyfikacja:** pętla ponawia **każdy**
+   wyjątek zamiast uczyć `is_retryable` o błędach brokera — to poszerzyłoby zakres
+   §14 #12 (tylko błędy providera, w bramce mutacyjnej) na ścieżkę jobów, gdzie
+   `RuntimeError` z naszego kodu wyglądałby nagle na transient. Jest też bez
+   znaczenia: unit ma `Restart=always`, więc każda porażka handshake'u i tak kończy
+   się retry — tyle że przez restart procesu. Retry in-process daje ten sam stan
+   końcowy bez tracebacku i bez 5 s `RestartSec`. Wyczerpanie prób nadal rzuca →
+   proces pada → systemd wznawia (bez zmiany dla złego hasła). Świeży klient na
+   próbę: nieudany handshake potrafi zatruć poprzedniego (tak samo robi
+   `_connect_or_skip` w suite integracyjnym). **Odłożone:** timeout pojedynczej
+   próby (`WORKER_CONNECT_TIMEOUT_S`) — dziś nieosiągalny broker blokuje w kliencie
+   Rust; to zachowanie sprzed zmiany, więc osobny PR.
