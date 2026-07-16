@@ -480,6 +480,20 @@ async def test_connect_and_login_caps_backoff_at_max_delay():
     assert sleep.delays == [1.0, 2.0, 2.0, 2.0]  # 4.0 and 8.0 clamped to the cap
 
 
+async def test_connect_and_login_applies_the_injected_jitter_to_backoff():
+    factory = _HandshakeFactory([RuntimeError("x"), RuntimeError("x")])
+    sleep = _RecordingSleep()
+
+    await connect_and_login(
+        factory,
+        make_config(),
+        connect_policy(max_attempts=4, base_delay_s=2.0, max_delay_s=10.0),
+        BackoffEffects(sleep=sleep, rand=lambda: 0.25),
+    )
+
+    assert sleep.delays == [0.5, 1.0]
+
+
 async def test_connect_and_login_single_attempt_policy_does_not_retry():
     factory = _HandshakeFactory([RuntimeError("nope")])
     sleep = _RecordingSleep()

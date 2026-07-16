@@ -144,6 +144,12 @@ def test_non_positive_connect_backoff_rejected():
         parse_connect_policy(_connect_env(WORKER_CONNECT_BACKOFF_BASE_S="0"))
 
 
+@pytest.mark.parametrize("value", ["nan", "inf"])
+def test_non_finite_connect_backoff_rejected(value):
+    with pytest.raises(ConfigError, match=r"must be a positive finite number"):
+        parse_connect_policy(_connect_env(WORKER_CONNECT_BACKOFF_BASE_S=value))
+
+
 def test_connect_max_below_base_reraised_as_config_error():
     with pytest.raises(ConfigError, match=r"^max_delay_s must be at least base_delay_s$"):
         parse_connect_policy(
