@@ -98,7 +98,7 @@ w PR `worker-loop` z testami integracyjnymi. `process_job(deps, job)` to rdzeń;
 - **połączenie z brokerem (§14 #16):** klient budujemy **wyłącznie** przez `IggyClient.from_connection_string(iggy_connection_string(...))` — `iggy+tcp://user:pass@host:port`, poświadczenia percent-encoded. To ustawia SDK-owe `auto_login`, więc **`connect()` uwierzytelnia**, także przy każdym wewnętrznym reconnectcie SDK (`send_raw_with_response` → `disconnect` → `connect` → retry). Ręczny `login_user` na `IggyClient(addr)` zostawia `auto_login: Disabled` → reconnect wraca nieuwierzytelniony → `RuntimeError: Unauthenticated` bez samonaprawy. **Nie dodawać `login_user` z powrotem.** `connect_broker` dokłada tylko ponawianie **samego connectu** (własna polityka `WORKER_CONNECT_*`, osobna od retry jobów — zimny broker chce wielu krótkich prób, płatne wywołanie modelu kilku długich; §14 #11 dostroiło tamte pod joby). Ponawia **każdy** wyjątek, nie `is_retryable` (ten jest zakresowo tylko o błędach providera, §14 #12, i uznałby błąd brokera za terminalny). Każda próba dostaje **świeżego klienta** (nieudany connect potrafi zatruć poprzedniego). Po wyczerpaniu prób wyjątek leci dalej → proces pada → systemd `Restart=always` wznawia, więc złe hasło nadal pada głośno. **Nie objęte:** pojedyncza próba nie ma własnego timeoutu (zachowanie sprzed zmiany; `WORKER_CONNECT_TIMEOUT_S` → osobny PR).
 - **provider routing:** po nazwie `model` → OpenAI albo Anthropic (`provider_for`); nieznany model / brak adaptera w rejestrze → `Result{status:"error"}`, żeby jeden zły job nie zatrzymał pętli.
 - **timeout (§14 #11):** **per próba** (`WORKER_JOB_TIMEOUT_S`), przez wstrzyknięty runner (domyślnie `asyncio.wait_for`) — timeout wypada jako `TimeoutError` (transient → retry). Wstrzyknięcie runnera zamiast zegara ściennego trzyma `process_job` w bramce mutacyjnej bez realnego czasu, jak wstrzykiwany `sleep`/`clock` w `ratelimit`.
-- **koszt:** z usage, per `project` → tabela kosztów (podstawa budżetu). Cennik jest **datowany** (`cost.py`: każdy model ma historię cen z datą wejścia w życie) — koszt liczony po stawce obowiązującej w dniu `submitted_at`, więc zaplanowane zmiany (np. koniec ceny promo Sonnet 5 dnia 2026-09-01) rozwiązują się same, bez ręcznej edycji i bez pobierania cen z sieci. `Decimal` z `cost.py` schodzi do `float` dopiero na granicy `Result.usage.cost_usd`. (Zapytanie agregujące per projekt/dzień dołoży się w PR `worker-loop`.)
+- **koszt:** z usage, per `project` → tabela kosztów (podstawa budżetu). Cennik jest **datowany** (`cost.py`: każdy model ma historię cen z datą wejścia w życie) — koszt liczony po stawce obowiązującej w dniu `submitted_at`, więc zaplanowane zmiany (np. koniec ceny promo Sonnet 5 dnia 2026-09-01) rozwiązują się same, bez ręcznej edycji i bez pobierania cen z sieci. `Decimal` z `cost.py` schodzi do `float` dopiero na granicy `Result.usage.cost_usd`. (Zapytanie agregujące per projekt/dzień jest **wdrożone**: `Store.cost_by_project_day()`, PR `worker-loop` — szczegóły w §11.)
 - **idempotencja:** przy at-least-once (worker padł po modelu, przed commitem offsetu) job wraca; `store.finalize` jest one-shot (`WHERE status='pending'`), więc redostawa dostaje `False` → brak podwójnego zapisu i podwójnego callbacku. Redostawa **ponawia** wywołanie modelu (koszt) — świadomy, rzadki koszt (tylko recovery po crashu), a `finalize` jest gwarancją poprawności. hate-mod ma dodatkowo własny dedup po `comment_id`.
 - **callback (§14 #14):** worker POST-uje `Result` (JSON, `by_alias`) na `callback_url` klientem **httpx** (extra `worker`). Dostawa jest **best-effort**: błąd POST-a → log + swallow, **bez retry** callbacku w v1 — wynik jest już trwale w store, więc poll (§11) to niezawodna ścieżka; retry/dead-letter callbacku to v2 (§13). Callback leci tylko gdy *ta* dostawa wygrała `finalize` (brak duplikatów).
 - **pętla consumer-group (`worker.py`, PR `worker-loop`):** cienka powłoka Iggy. `consumer_group` (join `llm-workers`, `create_if_not_exists`) + `consume_messages(callback, shutdown_event)` z `AutoCommit.After(ConsumingEachMessage)` → **commit offsetu PO przetworzeniu** (at-least-once; redostawa bezpieczna przez one-shot `finalize`). Topologia (`Topology`: stream `llmbus`/topic `llm-jobs`/1 partycja/grupa `llm-workers`) domyślna, ale wstrzykiwalna (izolacja testów integracyjnych po uuid). Payload → `Job` przez `decode_job` (pydantic, `extra="forbid"`). **Poison message (§14 #15):** ciało nieparsujące się na `Job` → log (z obciętym raw) + skip + commit dalej; halt/retry zawiesiłyby jedynego workera na jednej złej wiadomości, a bez `job_id` i tak nie ma czego finalizować (dead-letter → v2, §13). Wejście: `run_worker` (wiring config→deps + pętla, powłoka I/O, poza bramką mutacyjną, testy integracyjne na żywym Iggy) + `python -m llmbus.worker` z SIGINT/SIGTERM → `shutdown`. Czyste szwy (`decode_job`, `ensure_topology`, `make_callback_sender`, `_consume_one`, `_load`) — unit-testy z atrapami.
@@ -143,10 +143,25 @@ Katalog: `~/Programming/Python/llmbus/`. Klient `llmbus` używany w innych repo 
 
 Cały stack projektów chodzi pod **systemd + nginx**, więc Iggy wpinamy tak samo — **bez Dockera na prod**.
 
-### Prod (VPS `izabela213`) — plan wdrożenia (stan 2026-07-14: **jeszcze NIE postawione**)
+### Prod (VPS `izabela213`) — **POSTAWIONE i działa** (zweryfikowane 2026-07-17)
 Artefakty i runbook: **`deploy/`** (`iggy-server.service`, `llmbus-worker.service`,
-`iggy.env.example`, `deploy.sh`, `README.md`). Na maszynie nie ma jeszcze ani unitów, ani
-niczego na `:8092`. Ustalenia potwierdzone na maszynie (2026-07-14):
+`iggy.env.example`, `deploy.sh`, `README.md`).
+
+**Stan na 2026-07-17 09:30 UTC — sprawdzone bezpośrednio na maszynie** (nie z notatek):
+`iggy-server.service` i `llmbus-worker.service` oba `active`; broker słucha na
+`127.0.0.1:8092`; worker `NRestarts=0` (systemd **nigdy** go nie wskrzeszał → zero crashy),
+`MainPID` stabilny od 08:23:03 UTC, zero tracebacków i zero `broker connect failed`.
+Siedem linii „worker consuming" z 08:06–08:23 to **ręczny** test 6 restartów z PR
+`iggy-connection-string` (§14 #16), nie pętla awaryjna — dowodzi tego właśnie `NRestarts=0`.
+
+Z **wcześniejszych** sesji, nieprzewierzone ponownie 2026-07-17 (nie mylić z powyższym):
+smoke end-to-end (`deploy/smoke.py`, realny gpt-5-nano: submit → Iggy → worker → OpenAI →
+SQLite → `await_result` → `'pong'`) przeszedł **2026-07-17 ~08:55 UTC**, po wdrożeniu
+`iggy-connection-string`; zużycie `iggy-server` ~94 MB / `llmbus-worker` ~113 MB (cgroup
+`MemoryCurrent`) zmierzono **2026-07-14**. Odtworzenie: `.venv/bin/python deploy/smoke.py`
+na boxie (~$0.00006).
+
+Ustalenia potwierdzone na maszynie (2026-07-14, nadal aktualne):
 - **Iggy = binarka pod systemd, bez Dockera** (zgodnie z pierwotnym §9b). **0.8.0 nie ma
   prebuilt binarki** (release `server-0.8.0` bez assetów; Apache tylko źródła; brak crate'a
   `iggy-server`) → build ze źródeł z tagu `server-0.8.0`, ale **NIE na VPS-ie**: box ma
