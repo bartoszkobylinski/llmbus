@@ -439,6 +439,37 @@ async def test_process_job_does_not_retry_a_terminal_error():
         assert deps.sleep.calls == []
 
 
+async def test_process_job_fail_loud_truncation_error_is_terminal_and_preserved():
+    async with Store(":memory:") as store:
+        job = make_job()
+        await store.insert_pending(job)
+        provider = FakeProvider(
+            "openai",
+            [
+                ValueError(
+                    "OpenAI response finished with finish_reason='length', not 'stop' — "
+                    "the completion is truncated or absent; with 'length' the "
+                    "max_completion_tokens budget ran out (GPT-5 spends it on reasoning "
+                    "tokens too, so raise params.max_tokens well above the expected output)"
+                )
+            ],
+        )
+        deps = build_deps(store, provider)
+
+        result = await process_job(deps, job)
+
+        assert result.status == "error"
+        assert result.error == (
+            "ValueError: OpenAI response finished with finish_reason='length', not "
+            "'stop' — the completion is truncated or absent; with 'length' the "
+            "max_completion_tokens budget ran out (GPT-5 spends it on reasoning "
+            "tokens too, so raise params.max_tokens well above the expected output)"
+        )
+        assert result.provider == "openai"
+        assert len(provider.calls) == 1
+        assert deps.sleep.calls == []
+
+
 async def test_process_job_error_still_delivers_callback():
     async with Store(":memory:") as store:
         job = make_job(callback_url="http://cb")
