@@ -55,13 +55,15 @@ DEFAULT_POLL_INTERVAL_S = 0.1
 def encode_job(job: Job) -> SendMessage:
     """Serialize a `Job` into a wire `SendMessage` (§4 body JSON).
 
-    Uses `model_dump_json()` — the exact form the worker's `decode_job`
-    (`Job.model_validate_json`) round-trips. `Job` has no aliased fields, so
-    `by_alias` is moot here; the `in`/`out` aliases live only on `Usage`, on the
-    Result path. All metadata rides in the body because the SDK has no message
-    headers (§4).
+    `by_alias=True` is load-bearing: `ResponseFormat.json_schema` must publish
+    under its wire key `"schema"` (§4, §14 #10). Without it the producer emits
+    `"json_schema"` — which the worker's `decode_job` happens to tolerate
+    (`populate_by_name=True`), so nothing fails loudly; only the public wire
+    contract is silently violated (caught by Codex on the `structured-output`
+    PR). The worker round-trips via `Job.model_validate_json`. All metadata
+    rides in the body because the SDK has no message headers (§4).
     """
-    return SendMessage(job.model_dump_json())
+    return SendMessage(job.model_dump_json(by_alias=True))
 
 
 async def send_job(client: IggyClient, job: Job, topology: Topology = DEFAULT_TOPOLOGY) -> None:
