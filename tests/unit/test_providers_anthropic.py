@@ -30,11 +30,13 @@ _VERDICT_SCHEMA = {
 }
 
 
-def _response(text="ok", input_tokens=3, output_tokens=5, blocks=None):
+def _response(text="ok", blocks=None, stop_reason="end_turn", usage=(3, 5)):
     if blocks is None:
         blocks = [SimpleNamespace(type="text", text=text)]
+    input_tokens, output_tokens = usage
     return SimpleNamespace(
         content=blocks,
+        stop_reason=stop_reason,
         usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
     )
 
@@ -243,6 +245,25 @@ def test_completion_allows_empty_text_block():
     assert _completion_from_response(_response(text="")) == ""
 
 
+@pytest.mark.parametrize("stop_reason", ["max_tokens", "refusal", "pause_turn", "tool_use"])
+def test_completion_rejects_any_non_end_turn_stop(stop_reason):
+    with pytest.raises(ValueError) as exc_info:
+        _completion_from_response(_response(text="truncated…", stop_reason=stop_reason))
+    assert str(exc_info.value) == (
+        f"Anthropic response stopped early (stop_reason={stop_reason!r}, "
+        "not 'end_turn') — the completion is truncated or absent; with "
+        "'max_tokens', raise params.max_tokens"
+    )
+
+
+def test_completion_stop_reason_is_checked_before_text_blocks():
+    # A truncated response with no text block must report the truncation, not the
+    # missing block — the stop_reason is the root cause, the block just a symptom.
+    blocks = [SimpleNamespace(type="thinking", text="")]
+    with pytest.raises(ValueError, match="stop_reason='max_tokens'"):
+        _completion_from_response(_response(blocks=blocks, stop_reason="max_tokens"))
+
+
 def test_usage_maps_tokens_and_leaves_cost_zero():
     usage = _usage_from_anthropic(SimpleNamespace(input_tokens=7, output_tokens=11))
     assert usage == Usage(input_tokens=7, output_tokens=11)
@@ -261,7 +282,7 @@ def test_adapter_satisfies_provider_protocol():
 
 
 async def test_call_builds_request_and_returns_provider_result():
-    client = _client(_response(text="done", input_tokens=3, output_tokens=5))
+    client = _client(_response(text="done", usage=(3, 5)))
     adapter = AnthropicAdapter(client)
 
     result = await adapter.call(

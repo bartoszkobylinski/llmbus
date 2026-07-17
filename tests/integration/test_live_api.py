@@ -83,8 +83,12 @@ _VERDICT_SCHEMA = {
     "additionalProperties": False,
 }
 
+# GPT-5's `max_completion_tokens` budget covers reasoning tokens too: measured live
+# (2026-07-17), gpt-5-nano spent 448 reasoning tokens on this one-line prompt, so a
+# 128 budget ends with finish_reason "length" and an EMPTY completion. 2048 leaves
+# headroom; billing is per actual usage, so the headroom costs nothing.
 _VERDICT_PARAMS = JobParams(
-    max_tokens=128,
+    max_tokens=2048,
     response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA),
 )
 

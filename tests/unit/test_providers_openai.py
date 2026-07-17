@@ -28,9 +28,11 @@ _VERDICT_SCHEMA = {
 }
 
 
-def _response(content="ok", prompt_tokens=3, completion_tokens=5):
+def _response(content="ok", prompt_tokens=3, completion_tokens=5, finish_reason="stop"):
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+        choices=[
+            SimpleNamespace(message=SimpleNamespace(content=content), finish_reason=finish_reason)
+        ],
         usage=SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens),
     )
 
@@ -146,6 +148,26 @@ def test_completion_from_response_rejects_missing_content():
     with pytest.raises(ValueError) as exc_info:
         _completion_from_response(_response(content=None))
     assert str(exc_info.value) == "OpenAI response carried no completion content"
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter", "tool_calls"])
+def test_completion_from_response_rejects_any_non_stop_finish(finish_reason):
+    # The live_api run that motivated this: gpt-5-nano with max_completion_tokens=128
+    # spent all 128 on reasoning, finished with "length" and content="" — which the
+    # old None-only check waved through as a successful empty completion.
+    with pytest.raises(ValueError) as exc_info:
+        _completion_from_response(_response(content="", finish_reason=finish_reason))
+    assert str(exc_info.value) == (
+        f"OpenAI response finished with finish_reason={finish_reason!r}, "
+        "not 'stop' — the completion is truncated or absent; with 'length' the "
+        "max_completion_tokens budget ran out (GPT-5 spends it on reasoning "
+        "tokens too, so raise params.max_tokens well above the expected output)"
+    )
+
+
+def test_completion_from_response_rejects_truncation_even_with_partial_content():
+    with pytest.raises(ValueError, match="finish_reason='length'"):
+        _completion_from_response(_response(content='{"category":', finish_reason="length"))
 
 
 def test_usage_from_openai_maps_tokens_and_leaves_cost_zero():

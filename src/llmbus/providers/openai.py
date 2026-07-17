@@ -16,6 +16,11 @@ Structured output (§14 #10): a job's `ResponseFormat` maps onto the wire shape
 verified against openai 2.44.0 — `response_format={"type": "json_schema",
 "json_schema": {"name", "schema", "strict"}}` — always with `strict: true`,
 because the schema-validated guarantee is the entire point of the field.
+
+A completion is only returned on `finish_reason == "stop"`; anything else —
+notably `"length"`, whose budget includes GPT-5's reasoning tokens and so can
+leave the content empty — fails loud instead of passing truncation off as
+success (§7).
 """
 
 from __future__ import annotations
@@ -54,8 +59,23 @@ def _openai_request(model: str, messages: Sequence[Message], params: JobParams) 
 
 
 def _completion_from_response(response: Any) -> str:
-    """Extract the completion text, rejecting a missing one (fail-loud)."""
-    content: str | None = response.choices[0].message.content
+    """Extract the completion text, rejecting truncated or missing ones (fail-loud).
+
+    Only `finish_reason == "stop"` is a clean finish. `"length"` means the
+    `max_completion_tokens` budget ran out mid-generation — for GPT-5 that budget
+    also covers reasoning tokens, so a small cap yields an EMPTY completion
+    (measured live 2026-07-17: 448 reasoning tokens on a one-line prompt), which
+    would otherwise sail through as a "successful" empty string.
+    """
+    choice = response.choices[0]
+    if choice.finish_reason != "stop":
+        raise ValueError(
+            f"OpenAI response finished with finish_reason={choice.finish_reason!r}, "
+            "not 'stop' — the completion is truncated or absent; with 'length' the "
+            "max_completion_tokens budget ran out (GPT-5 spends it on reasoning "
+            "tokens too, so raise params.max_tokens well above the expected output)"
+        )
+    content: str | None = choice.message.content
     if content is None:
         raise ValueError("OpenAI response carried no completion content")
     return content

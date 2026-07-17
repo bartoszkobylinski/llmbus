@@ -18,6 +18,9 @@ why this is a separate adapter, not a shared class with the OpenAI one:
   claude-haiku-4-5 accepts 0.0-1.0. So temperature is validated per model (§7).
 - `response.content` is a list of blocks; the first `text` block is the
   completion. `usage.input_tokens`/`output_tokens` map straight to our `Usage`.
+- A completion is only returned on `stop_reason == "end_turn"`; `"max_tokens"`
+  (truncated — for structured output that is silently invalid JSON) and
+  `"refusal"`/`"pause_turn"` fail loud instead of passing as success (§7).
 - Structured output (§14 #10) is `output_config={"format": {"type":
   "json_schema", "schema": ...}}` (shape verified against anthropic 0.116.0).
   There is no `name` field in Anthropic's format, so the job's
@@ -88,12 +91,23 @@ def _anthropic_request(
 
 
 def _completion_from_response(response: Any) -> str:
-    """Return the first text block's text, rejecting a response that has none.
+    """Return the first text block's text, rejecting truncated or empty responses.
+
+    Only `stop_reason == "end_turn"` is a clean finish; `"max_tokens"` means the
+    completion was cut mid-generation (for structured output that is silently
+    invalid JSON), and `"refusal"`/`"pause_turn"` carry no usable completion —
+    all fail loud rather than returning a truncated string as success.
 
     A `text` block whose `text` is None is treated as no usable text (it would
     otherwise escape as `completion=None`, violating `ProviderResult.completion:
-    str`); an empty string is a valid completion.
+    str`); an empty string on a clean finish is a valid completion.
     """
+    if response.stop_reason != "end_turn":
+        raise ValueError(
+            f"Anthropic response stopped early (stop_reason={response.stop_reason!r}, "
+            "not 'end_turn') — the completion is truncated or absent; with "
+            "'max_tokens', raise params.max_tokens"
+        )
     for block in response.content:
         if block.type == "text" and block.text is not None:
             text: str = block.text
