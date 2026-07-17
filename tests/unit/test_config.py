@@ -363,6 +363,7 @@ def test_connection_string_uses_the_tcp_protocol_scheme():
         ("p@ss", "p%40ss"),  # @ would otherwise start the host part
         ("p:ss", "p%3Ass"),  # : would otherwise split user/password
         ("p/ss", "p%2Fss"),  # / would otherwise start the path
+        ("p%ss", "p%25ss"),  # a literal % must not be taken as an existing escape
         ("p ss", "p%20ss"),
         ("pąss", "p%C4%85ss"),  # non-ascii must not land raw in a URL
     ],
@@ -376,3 +377,23 @@ def test_connection_string_percent_encodes_the_password(password, encoded):
 
 def test_connection_string_percent_encodes_the_username():
     assert _conn(_cfg(iggy_username="a@b")) == ("iggy+tcp://a%40b:secret@127.0.0.1:8092")
+
+
+@pytest.mark.parametrize(
+    ("username", "encoded"),
+    [
+        ("a:b", "a%3Ab"),
+        ("a/b", "a%2Fb"),
+        ("a%b", "a%25b"),
+        ("ącki", "%C4%85cki"),
+    ],
+)
+def test_connection_string_percent_encodes_every_reserved_username_character(username, encoded):
+    assert _conn(_cfg(iggy_username=username)) == (f"iggy+tcp://{encoded}:secret@127.0.0.1:8092")
+
+
+def test_connection_string_encodes_both_credentials_without_touching_the_address():
+    assert (
+        iggy_connection_string("broker.example:9090", "u:s/er", "p@ss%word/443")
+        == "iggy+tcp://u%3As%2Fer:p%40ss%25word%2F443@broker.example:9090"
+    )
