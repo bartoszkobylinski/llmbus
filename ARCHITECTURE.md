@@ -58,7 +58,10 @@ Kroki:
   "kind": "classify|summarize|…",
   "model": "gpt-5-mini | claude-…",
   "messages": [{"role": "user", "content": "…"}],
-  "params": {"temperature": null, "max_tokens": 512},  // temperature opcjonalne; structured output poza v1 (§14 #10)
+  "params": {"temperature": null, "max_tokens": 512,
+             "response_format": {"type": "json_schema", "name": "verdict",
+                                 "schema": {"type": "object", "additionalProperties": false, "…": "…"}}},
+             // temperature opcjonalne; response_format opcjonalne (null = wolny tekst), §14 #10
   "callback_url": "http://…/internal/classified",   // albo null → poll
   "meta": {"comment_id": "…"},                        // wraca nietknięte
   "submitted_at": "…"
@@ -74,7 +77,7 @@ Kroki:
 - **`extra="forbid"`** na wszystkich modelach kontraktu — nieznane pole (np. literówka `callback` zamiast `callback_url`) = błąd od razu, nie ciche zgubienie. `meta` zostaje dowolnym słownikiem, więc elastyczność nie ucierpia.
 - **`job_id` musi być poprawnym UUID** (generowany jako `uuid4`), **normalizowany do postaci kanonicznej** (lowercase, z myślnikami) — to klucz w store i podstawa idempotencji/dedupu (§6). Warianty tego samego UUID (uppercase, `urn:uuid:…`, `{…}`) sprowadzamy do jednego klucza; pusty/„prosty"/z białymi znakami id jest odrzucany. Akceptujemy wyłącznie wejście typu `str` — `bytes`/inne typy odrzucane (`StrictStr`), żeby leniwa koercja nie przemyciła nie-stringa.
 - **`max_tokens` > 0** jeśli podane (nieprawidłowe u każdego providera). **`temperature` jest opcjonalne** (`null`/nieustawione = model używa swojej domyślnej) i nieograniczone w kontrakcie — obsługa i zakresy różnią się per model, więc waliduje je adapter providera (§7). Rodzina GPT-5 **odrzuca jakiekolwiek ustawione `temperature`** (§14 #9): adapter OpenAI zgłasza wtedy błąd **przed** wywołaniem API, zamiast cicho je gubić.
-- **`response_format` (structured output) NIE jest w kontrakcie v1** (§14 #10): goły `str` nie mapuje się czysto na żadnego providera — OpenAI chce obiektu, Anthropic używa `output_config.format` — więc pole, które znaczyłoby co innego per adapter, jest **odłożone do v2** zamiast udawać neutralność.
+- **`response_format` (structured output) — wyłącznie wariant `json_schema`** (§14 #10, ponownie otwarte i rozstrzygnięte 2026-07-17): `{"type": "json_schema", "name": str, "schema": {…}}` albo `null` (wolny tekst). Ten jeden kształt mapuje się natywnie na obu providerów (OpenAI `response_format` json_schema + `strict: true`; Anthropic `output_config.format`); luźny `json_object` to koncept tylko-OpenAI i celowo NIE wchodzi. Walidacja wczesna (fail-loud): `schema` musi być niepustym schematem obiektu z top-level `additionalProperties: false` — tego wymagają strict-mode OBU providerów, więc odrzucamy przy submit, nie po zakolejkowaniu. Głębsza poprawność schematu i reguły znaków w `name` (wymóg OpenAI; Anthropic pola nie ma — adapter je pomija) zostają po stronie providera. W Pythonie pole nazywa się `json_schema` (`schema` cieniuje atrybut `BaseModel`), na drucie `schema` (`by_alias=True`).
 
 **Uwaga o nagłówkach Iggy:** metadane (`project`, `model`, `priority`) logicznie należą do **nagłówków wiadomości**, ale Python SDK ich nie ma → w v1 wszystko idzie w body JSON. To jest dokładnie miejsce na ewentualną rozbudowę SDK (nagłówki).
 

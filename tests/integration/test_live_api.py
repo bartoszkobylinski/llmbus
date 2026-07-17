@@ -24,8 +24,10 @@ import pytest
 pytest.importorskip("anthropic", reason="live_api needs the `worker` extra (anthropic SDK)")
 pytest.importorskip("openai", reason="live_api needs the `worker` extra (openai SDK)")
 
+import json  # noqa: E402
+
 from llmbus.config import Config, build_providers  # noqa: E402
-from llmbus.schema import JobParams, Message  # noqa: E402
+from llmbus.schema import JobParams, Message, ResponseFormat  # noqa: E402
 
 pytestmark = [
     pytest.mark.live_api,
@@ -63,3 +65,59 @@ async def test_haiku_accepts_caller_set_temperature():
     # No 400 means Haiku honored the temperature — the inference holds.
     assert isinstance(result.completion, str)
     assert result.usage.output_tokens > 0
+
+
+# --- structured output (§14 #10) ---------------------------------------------
+# Type introspection against the pinned SDKs proved the request SHAPE compiles;
+# only a real call proves the SERVER accepts our exact mapping. One test per
+# provider: the completion must parse as JSON matching the schema — that is the
+# whole guarantee the field exists to provide.
+
+_VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "category": {"type": "string", "enum": ["neutral", "hate"]},
+        "confidence": {"type": "number"},
+    },
+    "required": ["category", "confidence"],
+    "additionalProperties": False,
+}
+
+_VERDICT_PARAMS = JobParams(
+    max_tokens=128,
+    response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA),
+)
+
+_VERDICT_PROMPT = [
+    Message(
+        role="user",
+        content='Classify the comment "have a nice day" as neutral or hate.',
+    )
+]
+
+
+def _assert_verdict(completion: str) -> None:
+    verdict = json.loads(completion)
+    assert set(verdict) == {"category", "confidence"}
+    assert verdict["category"] in ("neutral", "hate")
+    assert isinstance(verdict["confidence"], (int, float))
+
+
+async def test_anthropic_accepts_output_config_json_schema():
+    provider = build_providers(_live_config())["anthropic"]
+
+    result = await provider.call("claude-haiku-4-5", _VERDICT_PROMPT, _VERDICT_PARAMS)
+
+    _assert_verdict(result.completion)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("OPENAI_API_KEY"),
+    reason="OPENAI_API_KEY not set — this live_api test makes a real billable OpenAI call",
+)
+async def test_gpt5_accepts_strict_json_schema_response_format():
+    provider = build_providers(_live_config())["openai"]
+
+    result = await provider.call("gpt-5-nano", _VERDICT_PROMPT, _VERDICT_PARAMS)
+
+    _assert_verdict(result.completion)

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from llmbus.schema import Job, JobParams, Message, Result, Usage
+from llmbus.schema import Job, JobParams, Message, ResponseFormat, Result, Usage
 
 # Valid UUIDs for Result tests — job_id must parse as a UUID under the contract.
 _JOB_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
@@ -103,6 +103,7 @@ def test_job_round_trips_through_wire_json_with_submitted_at():
     assert wire["params"] == {
         "temperature": None,
         "max_tokens": None,
+        "response_format": None,
     }
     assert Job.model_validate_json(wire_json) == job
 
@@ -471,3 +472,128 @@ def test_job_params_reject_non_positive_max_tokens(bad_max_tokens):
 
 def test_job_params_accept_positive_max_tokens():
     assert JobParams(max_tokens=1).max_tokens == 1
+
+
+# --- ResponseFormat (§14 #10: json_schema only) ------------------------------
+
+_VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {"category": {"type": "string"}, "confidence": {"type": "number"}},
+    "required": ["category", "confidence"],
+    "additionalProperties": False,
+}
+
+
+def test_response_format_defaults_type_to_json_schema():
+    fmt = ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA)
+    assert fmt.type == "json_schema"
+    assert fmt.name == "verdict"
+    assert fmt.json_schema == _VERDICT_SCHEMA
+
+
+def test_response_format_rejects_other_types():
+    with pytest.raises(ValidationError):
+        ResponseFormat(type="json_object", name="verdict", json_schema=_VERDICT_SCHEMA)
+
+
+def test_response_format_accepts_single_char_name():
+    assert ResponseFormat(name="v", json_schema=_VERDICT_SCHEMA).name == "v"
+
+
+def test_response_format_rejects_empty_name():
+    with pytest.raises(ValidationError):
+        ResponseFormat(name="", json_schema=_VERDICT_SCHEMA)
+
+
+def test_response_format_requires_name_and_schema():
+    with pytest.raises(ValidationError):
+        ResponseFormat(name="verdict")
+    with pytest.raises(ValidationError):
+        ResponseFormat(json_schema=_VERDICT_SCHEMA)
+
+
+def test_response_format_rejects_unknown_fields():
+    with pytest.raises(ValidationError):
+        ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA, strict=True)
+
+
+# The three rejection tests assert the pydantic error `msg` by EXACT equality,
+# not `match=` — `match` is a substring search, which a mutated message string
+# still satisfies (see the mutmut-skips-dataclass-methods note: full-message
+# assertions are what pin error text in the mutation gate).
+
+
+def _sole_error_msg(exc_info) -> str:
+    errors = exc_info.value.errors()
+    assert len(errors) == 1
+    return errors[0]["msg"]
+
+
+def test_response_format_rejects_empty_schema():
+    with pytest.raises(ValidationError) as exc_info:
+        ResponseFormat(name="verdict", json_schema={})
+    assert (
+        _sole_error_msg(exc_info)
+        == "Value error, response_format schema must be a non-empty JSON Schema object"
+    )
+
+
+@pytest.mark.parametrize("top_type", ["array", "string", None])
+def test_response_format_rejects_non_object_top_level(top_type):
+    schema = {"type": top_type, "additionalProperties": False}
+    if top_type is None:
+        del schema["type"]
+    with pytest.raises(ValidationError) as exc_info:
+        ResponseFormat(name="verdict", json_schema=schema)
+    assert (
+        _sole_error_msg(exc_info)
+        == "Value error, response_format schema must declare top-level type 'object'"
+    )
+
+
+@pytest.mark.parametrize("extra_props", [True, {}, None])
+def test_response_format_rejects_loose_additional_properties(extra_props):
+    schema = {"type": "object", "additionalProperties": extra_props}
+    if extra_props is None:
+        del schema["additionalProperties"]
+    with pytest.raises(ValidationError) as exc_info:
+        ResponseFormat(name="verdict", json_schema=schema)
+    assert (
+        _sole_error_msg(exc_info)
+        == "Value error, response_format schema must set top-level additionalProperties to false"
+    )
+
+
+def test_response_format_serializes_schema_under_wire_alias():
+    fmt = ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA)
+    wire = fmt.model_dump(by_alias=True)
+    assert wire == {"type": "json_schema", "name": "verdict", "schema": _VERDICT_SCHEMA}
+    assert "json_schema" not in wire
+
+
+def test_response_format_parses_from_wire_alias():
+    fmt = ResponseFormat.model_validate(
+        {"type": "json_schema", "name": "verdict", "schema": _VERDICT_SCHEMA}
+    )
+    assert fmt.json_schema == _VERDICT_SCHEMA
+
+
+def test_job_params_response_format_defaults_to_none():
+    assert JobParams().response_format is None
+
+
+def test_job_round_trips_response_format_through_wire_json():
+    job = _minimal_job(
+        params={
+            "max_tokens": 128,
+            "response_format": {
+                "type": "json_schema",
+                "name": "verdict",
+                "schema": _VERDICT_SCHEMA,
+            },
+        }
+    )
+    wire = json.loads(job.model_dump_json(by_alias=True))
+    assert wire["params"]["response_format"]["schema"] == _VERDICT_SCHEMA
+    assert "json_schema" not in wire["params"]["response_format"]
+    assert Job.model_validate_json(job.model_dump_json(by_alias=True)) == job

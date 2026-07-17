@@ -18,6 +18,10 @@ why this is a separate adapter, not a shared class with the OpenAI one:
   claude-haiku-4-5 accepts 0.0-1.0. So temperature is validated per model (§7).
 - `response.content` is a list of blocks; the first `text` block is the
   completion. `usage.input_tokens`/`output_tokens` map straight to our `Usage`.
+- Structured output (§14 #10) is `output_config={"format": {"type":
+  "json_schema", "schema": ...}}` (shape verified against anthropic 0.116.0).
+  There is no `name` field in Anthropic's format, so the job's
+  `ResponseFormat.name` is dropped here — it exists for OpenAI's wire shape.
 """
 
 from __future__ import annotations
@@ -76,6 +80,10 @@ def _anthropic_request(
     temperature = _anthropic_temperature(model, params)
     if temperature is not None:
         request["temperature"] = temperature
+    if params.response_format is not None:
+        request["output_config"] = {
+            "format": {"type": "json_schema", "schema": params.response_format.json_schema}
+        }
     return request
 
 

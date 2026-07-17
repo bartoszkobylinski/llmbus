@@ -42,6 +42,49 @@ def _ensure_uuid(value: str) -> str:
 JobId = Annotated[StrictStr, AfterValidator(_ensure_uuid)]
 
 
+def _ensure_strict_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Reject a response schema neither provider's strict mode would accept.
+
+    Both mapped targets — OpenAI `json_schema` with `strict: true` and Anthropic
+    `output_config.format` — require the top level to be an object schema with
+    `additionalProperties: false` (§14 #10). Checking here fails the job at
+    submit time instead of after it was queued (§4 fail-loud). Deeper schema
+    validity stays the provider's job; nested objects are not walked.
+    """
+    if not schema:
+        raise ValueError("response_format schema must be a non-empty JSON Schema object")
+    if schema.get("type") != "object":
+        raise ValueError("response_format schema must declare top-level type 'object'")
+    if schema.get("additionalProperties") is not False:
+        raise ValueError("response_format schema must set top-level additionalProperties to false")
+    return schema
+
+
+class ResponseFormat(BaseModel):
+    """Structured-output request: constrain the completion to a JSON Schema.
+
+    Only the `json_schema` variant exists (§14 #10) — it is the one shape that
+    maps natively onto BOTH providers: OpenAI `response_format={"type":
+    "json_schema", "json_schema": {name, schema, strict}}` and Anthropic
+    `output_config={"format": {"type": "json_schema", "schema": ...}}`. OpenAI's
+    loose "JSON mode" (`json_object`) has no Anthropic equivalent and is
+    deliberately not in the contract. `name` is required by OpenAI's wire shape
+    (its charset rules are enforced by the provider, not here); Anthropic's has
+    no name field, so its adapter drops it.
+
+    The field is named `json_schema` in Python because `schema` shadows a
+    `BaseModel` attribute; the wire key is `schema` (§4, `by_alias=True`).
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    type: Literal["json_schema"] = "json_schema"
+    name: str = Field(min_length=1)
+    json_schema: Annotated[dict[str, Any], AfterValidator(_ensure_strict_object_schema)] = Field(
+        alias="schema"
+    )
+
+
 class Message(BaseModel):
     """One chat message in a job's prompt."""
 
@@ -60,16 +103,17 @@ class JobParams(BaseModel):
     temperature (§7, §14 #9). `max_tokens`, when set, must be positive — invalid at
     every provider.
 
-    Structured output (`response_format`) is deliberately **not** in the v1
-    contract (§14 #10): a bare string maps cleanly to no provider — OpenAI wants an
-    object, Anthropic uses `output_config.format` — so it is deferred to v2 rather
-    than shipped as a field that means something different per adapter.
+    `response_format` (structured output) is the `json_schema`-only
+    `ResponseFormat` type (§14 #10, reopened 2026-07-17 for the hate-moderator
+    pilot): unset means a free-text completion; set, each adapter maps it onto
+    its provider's native strict-JSON shape.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     temperature: float | None = None
     max_tokens: int | None = Field(default=None, gt=0)
+    response_format: ResponseFormat | None = None
 
 
 class Job(BaseModel):

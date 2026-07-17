@@ -11,6 +11,11 @@ GPT-5 specifics (verified July 2026, §14 #9): the whole family rejects any
 `max_completion_tokens`, not `max_tokens`. So this adapter maps
 `max_tokens -> max_completion_tokens` and rejects a job that sets a temperature
 the model won't honor — fail-loud, before the API call (§4).
+
+Structured output (§14 #10): a job's `ResponseFormat` maps onto the wire shape
+verified against openai 2.44.0 — `response_format={"type": "json_schema",
+"json_schema": {"name", "schema", "strict"}}` — always with `strict: true`,
+because the schema-validated guarantee is the entire point of the field.
 """
 
 from __future__ import annotations
@@ -36,6 +41,15 @@ def _openai_request(model: str, messages: Sequence[Message], params: JobParams) 
     request: dict[str, Any] = {"model": model, "messages": _openai_messages(messages)}
     if params.max_tokens is not None:
         request["max_completion_tokens"] = params.max_tokens
+    if params.response_format is not None:
+        request["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": params.response_format.name,
+                "schema": params.response_format.json_schema,
+                "strict": True,
+            },
+        }
     return request
 
 

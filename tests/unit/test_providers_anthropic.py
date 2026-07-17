@@ -18,9 +18,16 @@ from llmbus.providers.anthropic import (
     _usage_from_anthropic,
 )
 from llmbus.providers.base import Provider, ProviderResult
-from llmbus.schema import JobParams, Message, Usage
+from llmbus.schema import JobParams, Message, ResponseFormat, Usage
 
 _USER = [Message(role="user", content="hi")]
+
+_VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {"category": {"type": "string"}},
+    "required": ["category"],
+    "additionalProperties": False,
+}
 
 
 def _response(text="ok", input_tokens=3, output_tokens=5, blocks=None):
@@ -149,6 +156,32 @@ def test_request_forwards_supported_temperature():
         "claude-haiku-4-5", _USER, JobParams(max_tokens=64, temperature=0.7)
     )
     assert request["temperature"] == 0.7
+
+
+def test_request_maps_response_format_to_output_config():
+    params = JobParams(
+        max_tokens=64,
+        response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA),
+    )
+    request = _anthropic_request("claude-opus-4-8", _USER, params)
+    assert request["output_config"] == {
+        "format": {"type": "json_schema", "schema": _VERDICT_SCHEMA}
+    }
+
+
+def test_request_output_config_drops_openai_only_name():
+    params = JobParams(
+        max_tokens=64,
+        response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA),
+    )
+    request = _anthropic_request("claude-opus-4-8", _USER, params)
+    assert "verdict" not in repr(request)
+
+
+def test_request_omits_output_config_when_response_format_unset():
+    assert "output_config" not in _anthropic_request(
+        "claude-opus-4-8", _USER, JobParams(max_tokens=64)
+    )
 
 
 def test_request_omits_temperature_when_unset():

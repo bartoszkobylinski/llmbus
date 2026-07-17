@@ -16,9 +16,16 @@ from llmbus.providers.openai import (
     _openai_request,
     _usage_from_openai,
 )
-from llmbus.schema import JobParams, Message, Usage
+from llmbus.schema import JobParams, Message, ResponseFormat, Usage
 
 _MESSAGES = [Message(role="user", content="hi")]
+
+_VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {"category": {"type": "string"}},
+    "required": ["category"],
+    "additionalProperties": False,
+}
 
 
 def _response(content="ok", prompt_tokens=3, completion_tokens=5):
@@ -68,6 +75,19 @@ def test_request_combines_supported_openai_kwargs_without_temperature():
         "messages": [{"role": "user", "content": "hi"}],
         "max_completion_tokens": 128,
     }
+
+
+def test_request_maps_response_format_to_strict_json_schema():
+    params = JobParams(response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA))
+    request = _openai_request("gpt-5-nano", _MESSAGES, params)
+    assert request["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "verdict", "schema": _VERDICT_SCHEMA, "strict": True},
+    }
+
+
+def test_request_omits_response_format_when_unset():
+    assert "response_format" not in _openai_request("gpt-5", _MESSAGES, JobParams())
 
 
 def test_request_allows_unset_temperature():
