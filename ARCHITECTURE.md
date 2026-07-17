@@ -341,7 +341,10 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    (a) ręczny `login_user` + auto-reconnect **po cichu** gubi uwierzytelnienie — kanoniczny
    wariant z ich własnej fikstury nie jest reconnect-safe; (b) `leader_aware.rs` **połyka**
    błąd `get_cluster_metadata` (`warn!` + `Ok(None)`), więc `login_user()` zwraca `Ok` na
-   sesji, która właśnie odpowiedziała `Unauthenticated` — to ukrywa (a), ale go nie powoduje. Hasło/użytkownik są **percent-encoded** (`:`/`@`/`/` w haśle przemodelowałyby
+   sesji, która właśnie odpowiedziała `Unauthenticated` — to ukrywa (a), ale go nie powoduje.
+   **Pełny materiał dowodowy (dosłownie: wyniki, logi brokera, wycinki źródeł, oba skrypty
+   odtwarzające, gotowe zgłoszenia PL/EN, lista rzeczy NIEudowodnionych):**
+   `notes/iggy-sdk-auth-reconnect.md`. Hasło/użytkownik są **percent-encoded** (`:`/`@`/`/` w haśle przemodelowałyby
    URL). **Wcześniejsza diagnoza w tym #16 była BŁĘDNA** i została tu zastąpiona: mówiła, że
    sedno to `is_retryable(RuntimeError("Disconnected")) == False` i że lekiem jest retry
    handshake'u; retry **nie wystarcza** (Python widzi `connect`+`login` jako sukces, więc
