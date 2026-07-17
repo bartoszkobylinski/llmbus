@@ -3,7 +3,7 @@
 **Data:** 2026-07-03 · **Status:** projekt, przed implementacją.
 **Decyzje zamknięte:** pilot = `hate-moderator`; providerzy = OpenAI + Anthropic; backbone = Apache Iggy (Python SDK).
 
-> To jest żywy dokument. Sekcja 15 to lista otwartych decyzji — dopisujemy odpowiedzi w miarę pytań.
+> To jest żywy dokument. Sekcja 14 to lista otwartych decyzji — dopisujemy odpowiedzi w miarę pytań.
 
 ---
 
@@ -274,6 +274,33 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    (v1 mały). Wdrożone: `JobParams.response_format` usunięte; gałęzie forward/reject w obu
    adapterach usunięte; §4 odnotowuje odłożenie. Ustrukturyzowany output wróci w v2 jako typ
    mapujący się na realny kształt każdego providera. Decyzja podjęta w PR `config`.
+   **PONOWNIE OTWARTE (2026-07-17) → ROZSTRZYGNIĘTE NA NOWO — wariant C (typ
+   strukturalny); wdrożenie w PR `structured-output`.** Decyzja A zapadła bez sprawdzenia
+   pilota: hate-moderator — jedyny realny konsument busa i powód jego istnienia — **stoi
+   na tym polu** (`classifier.py:171`: `response_format={"type": "json_object"}`; pełny
+   materiał dowodowy: `notes/hate-mod-integration-survey.md`, bloker B1). Bez tego pola
+   kontrakt JSON klasyfikatora jest tylko promptowy, a fallback „nieparsowalne → cicho
+   neutral" **failuje otwarcie** (przepuszcza komentarz). Argument „C to scope creep"
+   upadł: to nie jest funkcja na zapas, tylko warunek wykonalności §8.
+   **Nowy kształt — kontrakt dostaje WYŁĄCZNIE wariant `json_schema`:**
+   `JobParams.response_format = {"type": "json_schema", "name": str, "schema": {…JSON
+   Schema…}} | None`. Ten wariant mapuje się czysto na OBU providerów — zweryfikowane
+   2026-07-17 na SDK w wersjach przypiętych w `uv.lock` (introspekcja typów, nie pamięć):
+   OpenAI 2.44.0 → `response_format={"type": "json_schema", "json_schema": {name, schema,
+   strict, description?}}`; Anthropic 0.116.0 → `output_config={"format": {"type":
+   "json_schema", "schema": …}}` (top-level `output_format` jest deprecated). Oba strict
+   warianty wymagają `additionalProperties: false` — czysty walidator w `schema.py`
+   wymusi to wcześnie (fail-loud, jak §4). **`json_object` (luźny „JSON mode") celowo NIE
+   wchodzi do kontraktu** — to koncept tylko-OpenAI bez odpowiednika u Anthropica, czyli
+   dokładnie ta per-providerowa niesymetria, przez którą #10 poleciało za pierwszym razem.
+   hate-mod przy integracji przechodzi z `json_object` na `json_schema` — dla niego
+   ściśle lepiej: odpowiedź walidowana schematem, więc otwarty fallback przestaje być
+   osiągalny w zwykłym trybie. Oryginalny zarzut #10 zostaje uszanowany: pole znaczy
+   dokładnie to samo u każdego providera. **Do potwierdzenia w PR (testy `live_api`, jak
+   przy #9):** że rodzina GPT-5 przez Chat Completions przyjmuje `json_schema`+`strict`
+   z naszymi mapowaniami (#9: `max_completion_tokens`, brak `temperature`) i że realny
+   model Anthropic przyjmuje nasz `output_config` — introspekcja typów dowodzi kształtu
+   SDK, nie zachowania serwera.
 11. ~~**Polityka retry/backoff/timeout workera + struktura PR.**~~ **ROZSTRZYGNIĘTE
    (PR `worker-core`).** Wartości są konfigiem (`.env`, nic hardcoded, §10): domyślnie
    `WORKER_MAX_ATTEMPTS=4` (1 + 3 retry), `WORKER_BACKOFF_BASE_S=0.5`,
@@ -360,3 +387,33 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    zatruć poprzedniego (tak samo robi `_connect_or_skip` w suite integracyjnym).
    **Odłożone:** timeout pojedynczej próby (`WORKER_CONNECT_TIMEOUT_S`) — dziś nieosiągalny
    broker blokuje w kliencie Rust; zachowanie sprzed zmiany, więc osobny PR.
+17. **Sync/async na styku z pilotem.** **ROZSTRZYGNIĘTE (2026-07-17) — hate-mod pozostaje
+   synchroniczny; llmbus pozostaje async-only.** Zasada „no sync wrappers in v1" stoi —
+   każdy most sync→async mieszka po stronie hate-moda, nie w busie. Uzasadnienie z kodu
+   (cytaty: `notes/hate-mod-integration-survey.md`), nie z gustu:
+   (a) sama zmiana §8 **usuwa** jedyne wolne I/O hate-moda — wywołanie OpenAI wychodzi
+   z procesu — więc przepisanie apki na async kupowałoby zdolność czekania dokładnie
+   wtedy, gdy przestaje mieć na co czekać; (b) promień rażenia przepisania: 212 miejsc
+   synchronicznego SQLAlchemy (`app/db.py:4-33`, `create_engine`/`Session`) + ~60 testów
+   `process_comment`, na systemie moderującym realne komentarze na produkcji;
+   (c) jedyny szew, który potrzebuje async — webhook `handle_webhook`
+   (`routes/webhook.py:37`) — **już jest** `async def`. Kształt integracji: submit
+   natywnie async w webhooku; `/internal/classified` **sync** (FastAPI i tak woła sync
+   endpointy w threadpoolu — istniejący kod decyzja/hide/`db.commit()` reużyty bez
+   zmian); cron `drain_queue.py` mostkuje `asyncio.run` na własnej krawędzi.
+   **Nierozstrzygnięty detal (do PR integracyjnego, w repo hate-moda):** cykl życia
+   `BusClient` — naiwne `asyncio.run(bus.submit(…))` per komentarz buduje i zrywa sesję
+   TCP do Iggy za każdym razem (a #16 nauczyło, że sesje Iggy to delikatna materia);
+   docelowo jeden trwały event loop z jednym `BusClient` + `run_coroutine_threadsafe`
+   z wątków sync.
+18. **`moderate()` NIE wchodzi na bus w v1 — rekomendacja, DO POTWIERDZENIA.** Otwarte.
+   §8 mówi „wychodzi do busa moderation + classify", ale `moderations.create` nie jest
+   chat-completion i nie mieści się w chat-only `Job` (§4, `messages: list[Message]`);
+   rozszerzenie kontraktu o typ nie-chatowy to realny scope creep, którego nie wymusza
+   żaden konsument. Ważniejsze — własny komentarz hate-moda (`classifier.py:240-248`)
+   opisuje `moderate()` jako **odporny na prompt-injection backstop** („content
+   classifier, not an instruction-follower — CANNOT be prompt-injected"); endpoint jest
+   darmowy i nie liczy się do usage, więc centralny rate-limit/koszt/retry nie daje mu
+   nic, a przenosiny ryzykują osłabienie zabezpieczenia przy okazji. Rekomendacja:
+   `moderate()` zostaje inline w hate-mod; na bus idzie samo `classify`; §8 do
+   przepisania zgodnie z tym w PR integracyjnym.
