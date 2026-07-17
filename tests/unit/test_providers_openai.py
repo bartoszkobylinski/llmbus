@@ -86,6 +86,27 @@ def test_request_maps_response_format_to_strict_json_schema():
     }
 
 
+def test_request_combines_response_format_with_max_completion_tokens():
+    params = JobParams(
+        max_tokens=128,
+        response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA),
+    )
+
+    assert _openai_request("gpt-5-mini", _MESSAGES, params) == {
+        "model": "gpt-5-mini",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_completion_tokens": 128,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "verdict",
+                "schema": _VERDICT_SCHEMA,
+                "strict": True,
+            },
+        },
+    }
+
+
 def test_request_omits_response_format_when_unset():
     assert "response_format" not in _openai_request("gpt-5", _MESSAGES, JobParams())
 
@@ -166,11 +187,43 @@ async def test_call_builds_request_and_returns_provider_result():
     assert result == ProviderResult(completion="done", usage=Usage(input_tokens=3, output_tokens=5))
 
 
+async def test_call_forwards_structured_output_at_the_sdk_boundary():
+    client = _client(_response(content='{"category":"neutral"}'))
+    adapter = OpenAIAdapter(client)
+    params = JobParams(
+        max_tokens=64,
+        response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA),
+    )
+
+    await adapter.call("gpt-5-nano", _MESSAGES, params)
+
+    client.chat.completions.create.assert_awaited_once_with(
+        model="gpt-5-nano",
+        messages=[{"role": "user", "content": "hi"}],
+        max_completion_tokens=64,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "verdict",
+                "schema": _VERDICT_SCHEMA,
+                "strict": True,
+            },
+        },
+    )
+
+
 async def test_call_rejects_temperature_before_touching_the_client():
     client = _client(_response())
     adapter = OpenAIAdapter(client)
 
     with pytest.raises(ValueError):
-        await adapter.call("gpt-5", _MESSAGES, JobParams(temperature=0.0))
+        await adapter.call(
+            "gpt-5",
+            _MESSAGES,
+            JobParams(
+                temperature=0.0,
+                response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA),
+            ),
+        )
 
     client.chat.completions.create.assert_not_awaited()

@@ -578,6 +578,49 @@ def test_response_format_parses_from_wire_alias():
     assert fmt.json_schema == _VERDICT_SCHEMA
 
 
+def test_response_format_rejects_alias_and_field_name_together():
+    with pytest.raises(ValidationError) as exc_info:
+        ResponseFormat.model_validate(
+            {
+                "name": "verdict",
+                "schema": _VERDICT_SCHEMA,
+                "json_schema": _VERDICT_SCHEMA,
+            }
+        )
+    assert exc_info.value.errors()[0]["loc"] == ("json_schema",)
+    assert exc_info.value.errors()[0]["type"] == "extra_forbidden"
+
+
+def test_response_format_accepts_schema_keywords_and_only_checks_top_level_strictness():
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {"detail": {"type": "object"}},
+        "type": "object",
+        "properties": {
+            "anything": {},
+            "detail": {
+                "type": "object",
+                "properties": {"note": {"type": ["string", "null"]}},
+            },
+        },
+        "additionalProperties": False,
+    }
+
+    assert ResponseFormat(name="verdict", json_schema=schema).json_schema == schema
+
+
+def test_response_format_requires_json_false_not_an_equal_integer():
+    with pytest.raises(ValidationError) as exc_info:
+        ResponseFormat(
+            name="verdict",
+            json_schema={"type": "object", "additionalProperties": 0},
+        )
+    assert (
+        _sole_error_msg(exc_info)
+        == "Value error, response_format schema must set top-level additionalProperties to false"
+    )
+
+
 def test_job_params_response_format_defaults_to_none():
     assert JobParams().response_format is None
 

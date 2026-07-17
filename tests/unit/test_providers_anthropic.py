@@ -169,6 +169,29 @@ def test_request_maps_response_format_to_output_config():
     }
 
 
+def test_request_combines_response_format_with_system_tokens_and_temperature():
+    params = JobParams(
+        max_tokens=64,
+        temperature=0.7,
+        response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA),
+    )
+
+    assert _anthropic_request(
+        "claude-haiku-4-5",
+        [Message(role="system", content="classify"), Message(role="user", content="hi")],
+        params,
+    ) == {
+        "model": "claude-haiku-4-5",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "system": "classify",
+        "temperature": 0.7,
+        "output_config": {
+            "format": {"type": "json_schema", "schema": _VERDICT_SCHEMA},
+        },
+    }
+
+
 def test_request_output_config_drops_openai_only_name():
     params = JobParams(
         max_tokens=64,
@@ -257,12 +280,40 @@ async def test_call_builds_request_and_returns_provider_result():
     assert result == ProviderResult(completion="done", usage=Usage(input_tokens=3, output_tokens=5))
 
 
+async def test_call_forwards_structured_output_at_the_sdk_boundary():
+    client = _client(_response(text='{"category":"neutral"}'))
+    adapter = AnthropicAdapter(client)
+    params = JobParams(
+        max_tokens=64,
+        response_format=ResponseFormat(name="provider-neutral-name", json_schema=_VERDICT_SCHEMA),
+    )
+
+    await adapter.call("claude-opus-4-8", _USER, params)
+
+    client.messages.create.assert_awaited_once_with(
+        model="claude-opus-4-8",
+        max_tokens=64,
+        messages=[{"role": "user", "content": "hi"}],
+        output_config={
+            "format": {"type": "json_schema", "schema": _VERDICT_SCHEMA},
+        },
+    )
+
+
 async def test_call_rejects_unsupported_temperature_before_touching_the_client():
     client = _client(_response())
     adapter = AnthropicAdapter(client)
 
     with pytest.raises(ValueError):
-        await adapter.call("claude-opus-4-8", _USER, JobParams(max_tokens=64, temperature=0.5))
+        await adapter.call(
+            "claude-opus-4-8",
+            _USER,
+            JobParams(
+                max_tokens=64,
+                temperature=0.5,
+                response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA),
+            ),
+        )
 
     client.messages.create.assert_not_awaited()
 
@@ -272,6 +323,10 @@ async def test_call_rejects_missing_max_tokens_before_touching_the_client():
     adapter = AnthropicAdapter(client)
 
     with pytest.raises(ValueError, match="requires max_tokens"):
-        await adapter.call("claude-opus-4-8", _USER, JobParams())
+        await adapter.call(
+            "claude-opus-4-8",
+            _USER,
+            JobParams(response_format=ResponseFormat(name="verdict", json_schema=_VERDICT_SCHEMA)),
+        )
 
     client.messages.create.assert_not_awaited()

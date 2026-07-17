@@ -9,10 +9,12 @@ here we test everything else against fakes and an in-memory store: `encode_job`,
 """
 
 import asyncio
+import json
 
 import pytest
 from apache_iggy import SendMessage
 
+import llmbus.client as client_module
 from llmbus.client import (
     DEFAULT_POLL_INTERVAL_S,
     DEFAULT_RESULT_TIMEOUT_S,
@@ -22,9 +24,9 @@ from llmbus.client import (
     result_from_stored,
     send_job,
 )
-from llmbus.schema import Job, JobParams, Message, Result, Usage
+from llmbus.schema import Job, JobParams, Message, ResponseFormat, Result, Usage
 from llmbus.store import Store, StoredJob
-from llmbus.worker import DEFAULT_TOPOLOGY, Topology
+from llmbus.worker import DEFAULT_TOPOLOGY, Topology, decode_job
 
 # --- fakes -------------------------------------------------------------------
 
@@ -126,13 +128,41 @@ def test_encode_job_produces_a_sendmessage():
     assert isinstance(encode_job(make_job()), SendMessage)
 
 
-def test_encode_job_body_round_trips_through_the_worker_decode():
+def test_encode_job_body_uses_wire_aliases_and_round_trips_through_worker(
+    monkeypatch,
+):
     # The wire body is exactly what the worker's Job.model_validate_json parses back
     # — encode_job and decode_job are mirrors across the bus (§4).
-    job = make_job(meta={"comment_id": "7"})
-    decoded = Job.model_validate_json(job.model_dump_json())
-    assert decoded.job_id == job.job_id
-    assert decoded.meta == {"comment_id": "7"}
+    schema = {
+        "type": "object",
+        "properties": {"category": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    job = make_job(
+        params=JobParams(
+            max_tokens=8,
+            response_format=ResponseFormat(name="verdict", json_schema=schema),
+        ),
+        meta={"comment_id": "7"},
+    )
+    payloads = []
+
+    def capture_send_message(payload):
+        payloads.append(payload)
+        return object()
+
+    # SendMessage is an opaque Rust-native SDK value with no payload accessor.
+    # Replace only its constructor at our encoder boundary to inspect the bytes
+    # handed to Iggy; no llmbus logic or SDK internals are patched.
+    monkeypatch.setattr(client_module, "SendMessage", capture_send_message)
+
+    encode_job(job)
+
+    assert len(payloads) == 1
+    wire = json.loads(payloads[0])
+    assert wire["params"]["response_format"]["schema"] == schema
+    assert "json_schema" not in wire["params"]["response_format"]
+    assert decode_job(payloads[0].encode()) == job
 
 
 # --- send_job ----------------------------------------------------------------
