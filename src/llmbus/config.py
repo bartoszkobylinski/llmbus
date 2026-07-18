@@ -62,6 +62,19 @@ def _require(env: Mapping[str, str], key: str) -> str:
     return value
 
 
+def _optional(env: Mapping[str, str], key: str) -> str | None:
+    """Return an optional setting (surrounding whitespace stripped), or `None` when
+    unset or blank.
+
+    Unlike `_require`, absence is not an error — for settings that are off by default,
+    e.g. the callback-signing secret (§14 #19), where `None` means "do not sign". A
+    blank line (`WORKER_CALLBACK_SECRET=`) is treated as unset, never as an empty
+    secret, so a half-filled `.env` can't produce a weak signature.
+    """
+    value = env.get(key, "").strip()
+    return value or None
+
+
 def _positive_float(env: Mapping[str, str], key: str) -> float:
     """Parse a strictly-positive, finite float setting, or raise `ConfigError`.
 
@@ -120,6 +133,11 @@ class Config:
     iggy_username: str
     iggy_password: str
     db_path: str
+    # Optional shared secret for signing worker→producer callbacks (§14 #19).
+    # Worker-only and off by default (`None` = deliver unsigned); a producer that
+    # only submits never needs it. Optional (has a default) so it does not force
+    # every consumer's `.env` to carry one.
+    callback_secret: str | None = None
 
     def __post_init__(self) -> None:
         # Copy first so a caller mutating the dict they passed in can't reach back
@@ -151,6 +169,8 @@ def parse_config(env: Mapping[str, str]) -> Config:
         # The SQLite results file. Shared: the worker writes it and a co-located
         # producer polls it (§3/§9b), so both resolve the same path from config.
         db_path=_require(env, "STORE_PATH"),
+        # Optional (§14 #19): absent/blank → None → callbacks POSTed unsigned.
+        callback_secret=_optional(env, "WORKER_CALLBACK_SECRET"),
     )
 
 

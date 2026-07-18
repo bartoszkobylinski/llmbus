@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
+import hmac
 import logging
 import random
 from collections.abc import Awaitable, Callable, Mapping
@@ -165,6 +167,37 @@ async def _call_with_retry(deps: WorkerDeps, job: Job, provider: Provider, estim
                 continue
             return result_error(job, provider.name, _describe(exc))
         return result_ok(job, provider.name, call, _price(job, call))
+
+
+# Callback signing (§14 #19). The worker POSTs the `Result` to a producer's
+# `callback_url`; when a shared secret is configured it signs the *raw body* so the
+# receiver can trust the sender. Header name + `sha256=<hex>` shape mirror the
+# hate-moderator Meta-webhook signature exactly, so its receiver verifies with the
+# same `hmac.compare_digest(f"sha256={...}", header)` it already runs. Pure logic
+# (in the mutation gate); the httpx POST that applies these lives in
+# `worker.make_callback_sender` and puts the *same* bytes on the wire.
+CALLBACK_SIGNATURE_HEADER = "X-Llmbus-Signature-256"
+
+
+def callback_signature(secret: str, body: bytes) -> str:
+    """HMAC-SHA256 of the raw callback body, formatted `sha256=<hexdigest>` (§14 #19)."""
+    digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
+def callback_headers(secret: str | None, body: bytes) -> dict[str, str]:
+    """Headers for a callback POST: JSON content-type, plus an HMAC signature over
+    `body` when a secret is set (§14 #19).
+
+    No secret → no signature header: delivery stays unauthenticated, the v1 default
+    for a localhost-only callback. `secret is None` is the off switch (config never
+    yields an empty-but-present secret — `parse_config` maps blank to `None`), so a
+    configured secret always signs.
+    """
+    headers = {"Content-Type": "application/json"}
+    if secret is not None:
+        headers[CALLBACK_SIGNATURE_HEADER] = callback_signature(secret, body)
+    return headers
 
 
 async def _deliver(deps: WorkerDeps, url: str, result: Result) -> None:

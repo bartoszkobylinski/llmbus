@@ -103,7 +103,7 @@ w PR `worker-loop` z testami integracyjnymi. `process_job(deps, job)` to rdzeń;
 - **timeout (§14 #11):** **per próba** (`WORKER_JOB_TIMEOUT_S`), przez wstrzyknięty runner (domyślnie `asyncio.wait_for`) — timeout wypada jako `TimeoutError` (transient → retry). Wstrzyknięcie runnera zamiast zegara ściennego trzyma `process_job` w bramce mutacyjnej bez realnego czasu, jak wstrzykiwany `sleep`/`clock` w `ratelimit`.
 - **koszt:** z usage, per `project` → tabela kosztów (podstawa budżetu). Cennik jest **datowany** (`cost.py`: każdy model ma historię cen z datą wejścia w życie) — koszt liczony po stawce obowiązującej w dniu `submitted_at`, więc zaplanowane zmiany (np. koniec ceny promo Sonnet 5 dnia 2026-09-01) rozwiązują się same, bez ręcznej edycji i bez pobierania cen z sieci. `Decimal` z `cost.py` schodzi do `float` dopiero na granicy `Result.usage.cost_usd`. (Zapytanie agregujące per projekt/dzień jest **wdrożone**: `Store.cost_by_project_day()`, PR `worker-loop` — szczegóły w §11.)
 - **idempotencja:** przy at-least-once (worker padł po modelu, przed commitem offsetu) job wraca; `store.finalize` jest one-shot (`WHERE status='pending'`), więc redostawa dostaje `False` → brak podwójnego zapisu i podwójnego callbacku. Redostawa **ponawia** wywołanie modelu (koszt) — świadomy, rzadki koszt (tylko recovery po crashu), a `finalize` jest gwarancją poprawności. hate-mod ma dodatkowo własny dedup po `comment_id`.
-- **callback (§14 #14):** worker POST-uje `Result` (JSON, `by_alias`) na `callback_url` klientem **httpx** (extra `worker`). Dostawa jest **best-effort**: błąd POST-a → log + swallow, **bez retry** callbacku w v1 — wynik jest już trwale w store, więc poll (§11) to niezawodna ścieżka; retry/dead-letter callbacku to v2 (§13). Callback leci tylko gdy *ta* dostawa wygrała `finalize` (brak duplikatów).
+- **callback (§14 #14):** worker POST-uje `Result` (JSON, `by_alias`) na `callback_url` klientem **httpx** (extra `worker`). Gdy ustawiony `WORKER_CALLBACK_SECRET`, POST jest podpisany HMAC-SHA256 po ciele (nagłówek `X-Llmbus-Signature-256`, §14 #19), a worker serializuje ciało raz i wysyła te same bajty (`content=`), by podpis pokrywał drut. Dostawa jest **best-effort**: błąd POST-a → log + swallow, **bez retry** callbacku w v1 — wynik jest już trwale w store, więc poll (§11) to niezawodna ścieżka; retry/dead-letter callbacku to v2 (§13). Callback leci tylko gdy *ta* dostawa wygrała `finalize` (brak duplikatów).
 - **pętla consumer-group (`worker.py`, PR `worker-loop`):** cienka powłoka Iggy. `consumer_group` (join `llm-workers`, `create_if_not_exists`) + `consume_messages(callback, shutdown_event)` z `AutoCommit.After(ConsumingEachMessage)` → **commit offsetu PO przetworzeniu** (at-least-once; redostawa bezpieczna przez one-shot `finalize`). Topologia (`Topology`: stream `llmbus`/topic `llm-jobs`/1 partycja/grupa `llm-workers`) domyślna, ale wstrzykiwalna (izolacja testów integracyjnych po uuid). Payload → `Job` przez `decode_job` (pydantic, `extra="forbid"`). **Poison message (§14 #15):** ciało nieparsujące się na `Job` → log (z obciętym raw) + skip + commit dalej; halt/retry zawiesiłyby jedynego workera na jednej złej wiadomości, a bez `job_id` i tak nie ma czego finalizować (dead-letter → v2, §13). Wejście: `run_worker` (wiring config→deps + pętla, powłoka I/O, poza bramką mutacyjną, testy integracyjne na żywym Iggy) + `python -m llmbus.worker` z SIGINT/SIGTERM → `shutdown`. Czyste szwy (`decode_job`, `ensure_topology`, `make_callback_sender`, `_consume_one`, `_load`) — unit-testy z atrapami.
 
 ## 7. Abstrakcja providera
@@ -461,3 +461,17 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    nic, a przenosiny ryzykują osłabienie zabezpieczenia przy okazji. Decyzja:
    `moderate()` zostaje inline w hate-mod; na bus idzie samo `classify`; §8
    przepisane zgodnie z tym w tym PR.
+19. **Uwierzytelnianie callbacku (bus→hate-mod) — ROZSTRZYGNIĘTE (2026-07-19) — HMAC po ciele.**
+   Worker POST-uje `Result` na `callback_url` (§6/§14 #14); po stronie hate-moda to nowy
+   **sync** endpoint `/internal/classified`, którego dziś NIE ma (survey:
+   `notes/hate-mod-integration-facts.md` §3). Callback podpisujemy **HMAC-SHA256 po surowym
+   ciele** żądania, nagłówek `X-Llmbus-Signature-256: sha256=<hex>` — ten sam kształt co
+   istniejąca weryfikacja Meta-webhooka w hate-mod (`webhook.py:100-106`,
+   `hmac.compare_digest`), więc strona odbiorcza jest niemal darmowa. Sekret: opcjonalny
+   `WORKER_CALLBACK_SECRET` (`.env`, worker-only; brak = callback niepodpisany — domyślnie
+   v1 dla callbacku tylko-localhost). **Wdrożenie (PR `feat/callback-hmac-auth`):** czyste
+   (bramka mutacyjna) `callback_signature`/`callback_headers` w `processing.py`;
+   `worker.make_callback_sender` serializuje ciało RAZ i POST-uje **te same bajty**
+   (`content=`, nie `json=`), by podpis pokrywał dokładnie to, co idzie na drut. Odrzucone:
+   (A) sam shared-secret w nagłówku (tożsamość bez integralności), (B) tylko-localhost bez
+   auth (lokalny proces mógłby sfałszować werdykt hide).

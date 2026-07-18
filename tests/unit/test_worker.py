@@ -8,6 +8,8 @@ over a fake (duck-typed) client, `_consume_one` (decode → process, poison drop
 mutation gate but still owes coverage.
 """
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -293,18 +295,22 @@ class FakeHttpClient:
         self.status_code = status_code
         self.posts = []
 
-    async def post(self, url, json):
-        self.posts.append((url, json))
+    async def post(self, url, content, headers):
+        self.posts.append((url, content, headers))
         return _FakeResponse(self.status_code)
 
 
 async def test_callback_sender_posts_json_payload():
     client = FakeHttpClient(status_code=200)
-    send = make_callback_sender(client)
+    send = make_callback_sender(client)  # no secret -> unsigned
 
     await send("http://cb/internal", {"job_id": "1", "status": "ok"})
 
-    assert client.posts == [("http://cb/internal", {"job_id": "1", "status": "ok"})]
+    url, content, headers = client.posts[0]
+    assert url == "http://cb/internal"
+    assert json.loads(content) == {"job_id": "1", "status": "ok"}
+    assert headers["Content-Type"] == "application/json"
+    assert "X-Llmbus-Signature-256" not in headers
 
 
 async def test_callback_sender_raises_on_non_2xx():

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import os
 import random
@@ -47,7 +48,7 @@ from llmbus.config import (
     parse_connect_policy,
     parse_worker_policy,
 )
-from llmbus.processing import CallbackSender, WorkerDeps, process_job
+from llmbus.processing import CallbackSender, WorkerDeps, callback_headers, process_job
 from llmbus.ratelimit import RateLimiter
 from llmbus.retry import RetryPolicy, WorkerPolicy, backoff_delay
 from llmbus.schema import Job
@@ -169,17 +170,22 @@ async def ensure_topology(client: IggyClient, topology: Topology = DEFAULT_TOPOL
         await client.create_topic(topology.stream, topology.topic, topology.partitions)
 
 
-def make_callback_sender(http_client: Any) -> CallbackSender:
-    """A `CallbackSender` that POSTs the result JSON over an injected httpx client.
+def make_callback_sender(http_client: Any, secret: str | None = None) -> CallbackSender:
+    """A `CallbackSender` that POSTs the result over an injected httpx client, signed
+    with an HMAC over the raw body when `secret` is set (§14 #19).
 
-    The client is injected so tests drive it with `httpx.MockTransport` (no
-    network) and `run_worker` owns its lifecycle. A non-2xx response raises; that
-    is fine — `processing._deliver` logs and swallows it, since callbacks are
-    best-effort and the store/poll path is the reliable one (§6).
+    Serializes the payload once and posts *those* bytes (`content=`, not `json=`), so
+    the signature in the headers covers exactly what goes on the wire — the receiver
+    hashes the raw request body it gets. The client is injected so tests drive it with
+    a fake / `httpx.MockTransport` (no network) and `run_worker` owns its lifecycle. A
+    non-2xx response raises; `processing._deliver` logs and swallows it, since callbacks
+    are best-effort and the store/poll path is the reliable one (§6).
     """
 
     async def send(url: str, payload: dict[str, Any]) -> None:
-        response = await http_client.post(url, json=payload)
+        body = json.dumps(payload).encode()
+        headers = callback_headers(secret, body)
+        response = await http_client.post(url, content=body, headers=headers)
         response.raise_for_status()
 
     return send
@@ -258,7 +264,7 @@ async def run_worker(
             rate_limiter=RateLimiter(config.rate_limits),
             store=store,
             policy=policy,
-            deliver_callback=make_callback_sender(http_client),
+            deliver_callback=make_callback_sender(http_client, config.callback_secret),
         )
         consumer = await client.consumer_group(
             topology.consumer_group,
