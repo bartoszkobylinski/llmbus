@@ -8,13 +8,18 @@ time. That is exactly what lets this module sit in the mutation gate.
 """
 
 import asyncio
+import hashlib
+import hmac
 from datetime import datetime, timezone
 
 import pytest
 
 from llmbus.processing import (
+    CALLBACK_SIGNATURE_HEADER,
     WorkerDeps,
     _default_apply_timeout,
+    callback_headers,
+    callback_signature,
     estimate_tokens,
     process_job,
     result_error,
@@ -220,6 +225,28 @@ def test_result_error_carries_message_and_no_usage():
 def test_result_error_allows_no_provider():
     result = result_error(make_job(), None, "no route")
     assert result.provider is None
+
+
+def test_callback_signature_is_hmac_sha256_of_the_exact_body():
+    body = b'{"job_id":"abc","status":"ok"}'
+    expected = hmac.new(b"shared-secret", body, hashlib.sha256).hexdigest()
+
+    assert callback_signature("shared-secret", body) == f"sha256={expected}"
+
+
+def test_callback_headers_include_content_type_and_framed_signature_when_secret_set():
+    body = b'{"job_id":"abc","status":"ok"}'
+
+    headers = callback_headers("shared-secret", body)
+
+    assert headers["Content-Type"] == "application/json"
+    assert headers[CALLBACK_SIGNATURE_HEADER] == callback_signature("shared-secret", body)
+
+
+def test_callback_headers_omit_signature_when_secret_is_none():
+    headers = callback_headers(None, b'{"job_id":"abc"}')
+
+    assert headers == {"Content-Type": "application/json"}
 
 
 # --- process_job: happy path -------------------------------------------------

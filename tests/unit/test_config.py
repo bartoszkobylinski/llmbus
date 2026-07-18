@@ -142,6 +142,24 @@ def test_parse_config_reads_every_field():
     )
 
 
+def test_parse_config_reads_callback_secret_when_present():
+    cfg = parse_config(_env(WORKER_CALLBACK_SECRET="  shared-secret  "))
+
+    assert cfg.callback_secret == "shared-secret"
+
+
+def test_parse_config_maps_blank_callback_secret_to_none():
+    cfg = parse_config(_env(WORKER_CALLBACK_SECRET="   "))
+
+    assert cfg.callback_secret is None
+
+
+def test_parse_config_leaves_callback_secret_none_when_absent():
+    cfg = parse_config(_ENV)
+
+    assert cfg.callback_secret is None
+
+
 def test_parse_config_is_frozen():
     cfg = parse_config(_ENV)
     with pytest.raises(AttributeError):

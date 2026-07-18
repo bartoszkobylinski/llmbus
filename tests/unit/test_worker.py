@@ -8,13 +8,15 @@ over a fake (duck-typed) client, `_consume_one` (decode → process, poison drop
 mutation gate but still owes coverage.
 """
 
+import hashlib
+import hmac
 import json
 
 import pytest
 from pydantic import ValidationError
 
 from llmbus.config import Config
-from llmbus.processing import WorkerDeps
+from llmbus.processing import CALLBACK_SIGNATURE_HEADER, WorkerDeps
 from llmbus.providers.base import ProviderResult
 from llmbus.retry import RetryPolicy, WorkerPolicy, is_retryable
 from llmbus.schema import Job, JobParams, Message, Usage
@@ -311,6 +313,18 @@ async def test_callback_sender_posts_json_payload():
     assert json.loads(content) == {"job_id": "1", "status": "ok"}
     assert headers["Content-Type"] == "application/json"
     assert "X-Llmbus-Signature-256" not in headers
+
+
+async def test_callback_sender_signs_the_exact_posted_bytes_when_secret_is_set():
+    client = FakeHttpClient(status_code=200)
+    send = make_callback_sender(client, secret="shared-secret")
+
+    await send("http://cb/internal", {"job_id": "1", "status": "ok"})
+
+    _url, content, headers = client.posts[0]
+    expected = hmac.new(b"shared-secret", content, hashlib.sha256).hexdigest()
+    assert headers["Content-Type"] == "application/json"
+    assert headers[CALLBACK_SIGNATURE_HEADER] == f"sha256={expected}"
 
 
 async def test_callback_sender_raises_on_non_2xx():
