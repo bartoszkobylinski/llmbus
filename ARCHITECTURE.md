@@ -116,9 +116,9 @@ Interfejs `call(model, messages, params) -> {completion, usage}`; implementacje 
 **Kontrakt „provider nie wycenia":** `ProviderResult.usage.cost_usd` musi zostać `0.0` — provider raportuje wyłącznie tokeny, a `cost.py` jest jedynym źródłem ceny (tabela datowana, §6, bez cen z sieci). `ProviderResult` **odrzuca** (`ValueError`) usage z niezerowym `cost_usd` — fail-loud, jak reszta kontraktu (§4). Dzięki temu cena zgłoszona przez API providera (np. przyszły OpenRouter, który zwraca koszt) nie przecieka i nie przesłania ceny liczonej lokalnie po stawce z dnia `submitted_at`. `Usage` jest przy tym **immutable** (`frozen=True`), więc `cost_usd` nie da się podmienić po konstrukcji — gwarancja jest strukturalna, nie tylko w chwili tworzenia (wycena downstream buduje **nowy** `Usage`, nie mutuje istniejącego).
 
 ## 8. Integracja hate-moderator (pilot) — co się zmienia
-- **Zostaje w hate-mod:** webhook (HMAC), dedup po `comment_id`, decyzja policy, `hide_comment`, zapis do DB, (semafor/cap — do decyzji czy przenieść do busa).
-- **Wychodzi do busa:** samo wywołanie OpenAI (moderation + classify).
-- **Zmiana w kodzie:** w `app/workers/poller.py::process_comment` zamiast inline `classifier.classify(...)` → `llmbus.submit(..., callback="/internal/classified")`. Nowy endpoint robi decyzję + hide + zapis.
+- **Zostaje w hate-mod:** webhook (HMAC), dedup po `comment_id`, **`moderate()`** (prompt-injection-odporny backstop — §14 #18), decyzja policy, `hide_comment`, zapis do DB, (semafor/cap — §14 #2).
+- **Wychodzi do busa:** **wyłącznie `classify`** (chat-completion). `moderate()` NIE wchodzi — `moderations.create` to nie chat-completion (nie mieści się w chat-only `Job`, §4), jest darmowy i jest prompt-injection-odpornym backstopem, którego przenosiny by nie wzmocniły, a mogłyby osłabić (§14 #18).
+- **Zmiana w kodzie:** w `app/workers/poller.py::process_comment` `moderate()` woła się nadal inline; następnie zamiast inline `classifier.classify(...)` → `bus.submit(<classify-job>, callback="/internal/classified")`, gdzie job niesie `response_format` = `json_schema` (§14 #10 — zamyka fail-open fallback „nieparsowalne → neutral"). Nowy **sync** endpoint `/internal/classified` robi decyzję + hide + zapis. Auth callbacku (bus→hate-mod, B4) i cykl życia `BusClient` (§14 #17) — do PR integracyjnego; blokery B1–B6 w `notes/hate-mod-integration-survey.md`.
 - **Efekt:** flood nie dotyka web-latency, OpenAI poza procesem web, praca przeżywa restart — dokładnie „out-of-process classification queue" z ich ROADMAPu, tylko na Iggy zamiast Postgres-queue.
 
 ## 9. Struktura repo (propozycja)
@@ -243,15 +243,30 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    i POST-uje surowy `Result` na `callback_url`, a domenę (decyzja hide, `hide_comment`,
    zapis) robi hate-mod w `/internal/classified` (§3, §8). Worker nie zna semantyki
    `kind` — to trzyma §1 (bus generyczny, mały). Decyzja podjęta w PR `worker-core`.
-2. Rate-limit: tylko globalny w busie, czy zostawić też lokalny cap w hate-mod?
-3. Dystrybucja klienta `llmbus` do innych repo (editable / path / pip prywatny)?
+2. ~~Rate-limit: tylko globalny w busie, czy zostawić też lokalny cap w hate-mod?~~
+   **ROZSTRZYGNIĘTE (2026-07-18) — lokalne limity ZOSTAJĄ w hate-mod.** To dwie różne
+   rzeczy, nie jeden „rate-limit": `BoundedSemaphore(4)` chroni *własny* threadpool/pamięć
+   procesu hate-moda (nie providera), a rolling-24h cap per user to *reguła produktowa*
+   (domena). Bus przejmuje wyłącznie globalny rate-limit providera (§6); §1 mówi, że bus
+   nie zna domeny, więc żadnego z tych dwóch nie wciąga. Wsad: `notes/hate-mod-integration-survey.md` §3.
+3. ~~Dystrybucja klienta `llmbus` do innych repo (editable / path / pip prywatny)?~~
+   **ROZSTRZYGNIĘTE (2026-07-18) — editable path install.** Oba repo są lokalne w
+   `~/Programming/Python/`, a `llmbus` niesie `py.typed` (§14 #8), więc typy przechodzą do
+   konsumenta. hate-mod dodaje `llmbus` jako editable/path zależność (`uv`), bez prywatnego
+   indeksu pip w v1.
 4. ~~Results: `store + callback` wystarczy, czy chcesz też topic `llm-results`?~~
    **ROZSTRZYGNIĘTE — `store + callback`, bez `llm-results` w v1.** Wyniki NIE wracają
    przez Iggy (§5): worker zapisuje `Result` do store (SQLite), dostawa idzie callbackiem
    (§3) i/lub pollingiem (#7). Osobny topic `llm-results` to scope wobec §1 — odłożony do
    v2. Decyzja podjęta w PR `store`.
 5. ~~Iggy server: docker lokalnie → potem VPS?~~ **ROZSTRZYGNIĘTE (sekcja 9b):** prod = binarka pod systemd na VPS (**`127.0.0.1:8092`** — nie 8090, które na tym boxie zajmuje `beziarnia`/gunicorn; nginx poza ścieżką); dev = osobny lokalny Iggy (Docker na macu, `8090`), nie łączymy się do prod. Jeden serwer na VPS dla wszystkich projektów.
-6. Model klasyfikacji dla hate-mod: który z rodziny GPT-5 (gpt-5-mini/nano) lub Anthropic? (OpenAI = GPT-5, nie 4o.)
+6. ~~Model klasyfikacji dla hate-mod: który z rodziny GPT-5 (gpt-5-mini/nano) lub Anthropic?~~
+   **ROZSTRZYGNIĘTE (2026-07-18) — zostaje `gpt-5.4-mini`.** To już świadomy wybór prod
+   hate-moda (`config.py:23-29`): `-nano` przepalał false-positive na polskich niuansach,
+   a stawki kosztu są przypięte do tego modelu. #6 to więc potwierdzenie istniejącej
+   wartości, nie zmiana kodu. Uwaga: live-test structured output (§14 #10) szedł na
+   `gpt-5-nano`; `-mini` to ta sama rodzina/API, mapowanie `json_schema`+`strict`
+   identyczne, ale nie zweryfikowane live osobno dla `-mini`.
 7. ~~Sync (poll `await_result`) vs async (callback) — czy oba wspieramy w v1, czy tylko callback?~~
    **ROZSTRZYGNIĘTE — oba w v1.** Callback to główna ścieżka (hate-mod, §3); poll
    (`await_result(job_id)`) dokłada tanią ścieżkę dla batch/skryptów, bo czyta ten sam plik
@@ -425,12 +440,17 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    natywnie async w webhooku; `/internal/classified` **sync** (FastAPI i tak woła sync
    endpointy w threadpoolu — istniejący kod decyzja/hide/`db.commit()` reużyty bez
    zmian); cron `drain_queue.py` mostkuje `asyncio.run` na własnej krawędzi.
-   **Nierozstrzygnięty detal (do PR integracyjnego, w repo hate-moda):** cykl życia
-   `BusClient` — naiwne `asyncio.run(bus.submit(…))` per komentarz buduje i zrywa sesję
-   TCP do Iggy za każdym razem (a #16 nauczyło, że sesje Iggy to delikatna materia);
-   docelowo jeden trwały event loop z jednym `BusClient` + `run_coroutine_threadsafe`
-   z wątków sync.
-18. **`moderate()` NIE wchodzi na bus w v1 — rekomendacja, DO POTWIERDZENIA.** Otwarte.
+   **Cykl życia `BusClient` — ROZSTRZYGNIĘTE (2026-07-19); survey ujawnił DWA procesy
+   sięgające `classify()`, nie jeden (`notes/hate-mod-integration-facts.md` §5):**
+   (1) **ścieżka web** (zawsze żyjący uvicorn, 1 worker) — jeden trwały loop + jeden
+   `BusClient` w FastAPI `lifespan` (`main.py:220-235`); sync `process_comment`
+   (`poller.py:232`) sięga po niego przez `run_coroutine_threadsafe`.
+   (2) **cron `drain_queue.py`** (osobny, krótko żyjący proces, BEZ lifespanu i loopa) —
+   **Option A:** jeden `BusClient` na CAŁY przebieg draina (`asyncio.run` wokół
+   `drain_all()`), reużywany dla wszystkich pending-komentarzy w tym przebiegu, **nie**
+   nowy klient per komentarz (to jest churn sesji TCP, przed którym ostrzega #16). Naiwne
+   `asyncio.run(submit)` per komentarz odrzucone.
+18. ~~**`moderate()` na bus w v1?**~~ **ROZSTRZYGNIĘTE (2026-07-18) — NIE; potwierdzone przez usera.**
    §8 mówi „wychodzi do busa moderation + classify", ale `moderations.create` nie jest
    chat-completion i nie mieści się w chat-only `Job` (§4, `messages: list[Message]`);
    rozszerzenie kontraktu o typ nie-chatowy to realny scope creep, którego nie wymusza
@@ -438,6 +458,6 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    opisuje `moderate()` jako **odporny na prompt-injection backstop** („content
    classifier, not an instruction-follower — CANNOT be prompt-injected"); endpoint jest
    darmowy i nie liczy się do usage, więc centralny rate-limit/koszt/retry nie daje mu
-   nic, a przenosiny ryzykują osłabienie zabezpieczenia przy okazji. Rekomendacja:
-   `moderate()` zostaje inline w hate-mod; na bus idzie samo `classify`; §8 do
-   przepisania zgodnie z tym w PR integracyjnym.
+   nic, a przenosiny ryzykują osłabienie zabezpieczenia przy okazji. Decyzja:
+   `moderate()` zostaje inline w hate-mod; na bus idzie samo `classify`; §8
+   przepisane zgodnie z tym w tym PR.
