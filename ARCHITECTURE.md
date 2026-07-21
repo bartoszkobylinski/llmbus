@@ -49,6 +49,14 @@ Kroki:
 
 **Wariant bez callbacku (poll):** caller robi `await_result(job_id)` (pętla poll po store). Do skryptów batchowych (news), gdzie caller może poczekać.
 
+> ⚠ **Pilot (hate-moderator) używa POLLA, nie callbacku — §14 #20 (2026-07-21).** Schemat wyżej
+> opisuje wariant callbackowy, który zostaje wspierany (§14 #7) i zaimplementowany po stronie
+> workera wraz z podpisem HMAC (§14 #19), ale **pierwszy realny konsument go nie używa**. Powód
+> jest w kodzie hate-moda, nie w busie: na żywej ścieżce webhooka komentarz idący do `classify()`
+> **nie ma żadnego wiersza `PendingComment`** (wiersze powstają wyłącznie w gałęziach awaryjnych),
+> więc zgubiony callback = komentarz cicho zgubiony. Pełny materiał:
+> `notes/hate-mod-integration-facts-2026-07-21.md` §4c.
+
 ## 4. Kontrakt wiadomości
 **Job (na `llm-jobs`):**
 ```json
@@ -118,8 +126,31 @@ Interfejs `call(model, messages, params) -> {completion, usage}`; implementacje 
 ## 8. Integracja hate-moderator (pilot) — co się zmienia
 - **Zostaje w hate-mod:** webhook (HMAC), dedup po `comment_id`, **`moderate()`** (prompt-injection-odporny backstop — §14 #18), decyzja policy, `hide_comment`, zapis do DB, (semafor/cap — §14 #2).
 - **Wychodzi do busa:** **wyłącznie `classify`** (chat-completion). `moderate()` NIE wchodzi — `moderations.create` to nie chat-completion (nie mieści się w chat-only `Job`, §4), jest darmowy i jest prompt-injection-odpornym backstopem, którego przenosiny by nie wzmocniły, a mogłyby osłabić (§14 #18).
-- **Zmiana w kodzie:** w `app/workers/poller.py::process_comment` `moderate()` woła się nadal inline; następnie zamiast inline `classifier.classify(...)` → `bus.submit(<classify-job>, callback="/internal/classified")`, gdzie job niesie `response_format` = `json_schema` (§14 #10 — zamyka fail-open fallback „nieparsowalne → neutral"). Nowy **sync** endpoint `/internal/classified` robi decyzję + hide + zapis. Auth callbacku (bus→hate-mod, B4) i cykl życia `BusClient` (§14 #17) — do PR integracyjnego; blokery B1–B6 w `notes/hate-mod-integration-survey.md`.
-- **Efekt:** flood nie dotyka web-latency, OpenAI poza procesem web, praca przeżywa restart — dokładnie „out-of-process classification queue" z ich ROADMAPu, tylko na Iggy zamiast Postgres-queue.
+- **Zmiana w kodzie (POPRAWIONE 2026-07-21, §14 #20 — poll, nie callback):** w
+  `app/workers/poller.py::process_comment` (`poller.py:232`, sync) `moderate()` woła się nadal
+  inline; następnie zamiast inline `classifier.classify(...)` (`poller.py:427-429`) idzie
+  `submit` + **`await_result(job_id, timeout_s=BUS_TIMEOUT_S)`** — wywołanie zostaje
+  **blokujące w tej samej ramce**, więc cały ogon decyzja → `hide_comment` → atomowy
+  `db.commit()` (`poller.py:465-574`) zostaje **nietknięty**. Job niesie `response_format` =
+  `json_schema` (§14 #10 — zamyka fail-open fallback „nieparsowalne → neutral").
+  **`TimeoutError` z busa wpada w ISTNIEJĄCĄ ścieżkę awaryjną** `_enqueue_pending(reason=
+  "classifier_unavailable")` (`poller.py:442-451`) — z punktu widzenia hate-moda timeout busa
+  wygląda dokładnie jak dzisiejsza niedostępność klasyfikatora, więc nie powstaje nowa semantyka
+  awarii. **`/internal/classified` NIE powstaje.** Cykl życia `BusClient` — §14 #17 (lifespan dla
+  weba, `asyncio.run` wokół całego przebiegu dla crona). Blokery B1–B6:
+  `notes/hate-mod-integration-survey.md`; stan faktyczny kodu:
+  `notes/hate-mod-integration-facts-2026-07-21.md`.
+- **Czego ta wersja świadomie NIE kupuje:** web **czeka** na werdykt (dziś też czeka — na
+  synchroniczne OpenAI), więc „flood nie dotyka web-latency" z pierwotnego §8 **nie zachodzi**
+  w tym wariancie. Kupujemy centralny rate-limit/retry/koszt (§1, §6) i trwałość zlecenia na
+  Iggy; nie kupujemy odczepienia latencji. To był świadomy wybór (§14 #20): odczepienie latencji
+  kosztowałoby przebudowę prodowej ścieżki moderacji i otwierało dziurę cichego gubienia
+  komentarzy.
+- **Budżet czasu:** `BUS_TIMEOUT_S` **musi** być mniejszy niż `CLAIM_LEASE` hate-moda
+  (`poller.py:582`, dziś 5 min), inaczej cron przejmie wiersz, którego job jeszcze leci, i
+  zapłacimy za `classify` dwa razy + zrobimy drugi `hide` — dokładnie regresja, którą zamknął
+  ich commit `376699b`. To sprzężenie configu **między repozytoriami** — zmiana jednej strony
+  bez drugiej jest cicha i płatna.
 
 ## 9. Struktura repo (propozycja)
 ```
@@ -487,3 +518,37 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    (`content=`, nie `json=`), by podpis pokrywał dokładnie to, co idzie na drut. Odrzucone:
    (A) sam shared-secret w nagłówku (tożsamość bez integralności), (B) tylko-localhost bez
    auth (lokalny proces mógłby sfałszować werdykt hide).
+20. **Dostawa werdyktu do pilota: callback czy poll?** **ROZSTRZYGNIĘTE (2026-07-21) — POLL
+   (`await_result`), nie callback; potwierdzone przez usera.** Bus wspiera oba (§14 #7) i
+   callback jest po stronie workera gotowy wraz z HMAC (§14 #19) — pilot go po prostu **nie
+   używa**. Powód nie jest estetyczny; wyszedł z przeglądu realnego kodu hate-moda
+   (`notes/hate-mod-integration-facts-2026-07-21.md`, cytaty `plik:linia`):
+   **(a) Callback gubiłby komentarze po cichu.** Wiersz `PendingComment` powstaje **wyłącznie**
+   w gałęziach awaryjnych `_enqueue_pending` (`poller.py:406/442/488/508`). Na żywej ścieżce
+   webhooka komentarz dochodzący do `classify()` **nie ma żadnego wiersza**. Gdyby `classify()`
+   był submitem z callbackiem, zgubiony callback = brak wiersza, brak tokenu dedup (insert
+   `ClassifiedComment` `poller.py:528` nigdy nie biegnie), nic do zdrenowania — komentarz znika
+   bez śladu. Naprawa wymagałaby tworzenia wiersza **przed** submitem na obu ścieżkach, czyli
+   zmiany zachowania prodowej moderacji.
+   **(b) Kolizja z leasem.** `CLAIM_LEASE = 5 min` (`poller.py:582`), bez heartbeatu, bez
+   odnawiania, nigdy nieprzedłużany (`poller.py:607-610`; jedyni pisarze `claimed_at` to
+   `poller.py:615` i `poller.py:220`). Najgorszy przypadek llmbusa to ~5 min
+   (`WORKER_MAX_ATTEMPTS=4` × `WORKER_JOB_TIMEOUT_S=60` + backoff, §14 #11). Job przekraczający
+   lease → cron przejmuje wiersz → **druga płatna klasyfikacja i drugi `hide`**, czyli regresja,
+   którą ich commit `376699b` zamykał.
+   **(c) Zgubiony callback nie bije `attempts`** (robi to tylko `_enqueue_pending`,
+   `poller.py:206`), więc taki wiersz re-drive'owałby się **w nieskończoność** zamiast poddać
+   po `MAX_RETRY_ATTEMPTS` (`poller.py:159/641`).
+   **Co poll zachowuje bez zmian:** atomowy `db.commit()` (`poller.py:568`) spinający dedup +
+   liczniki kosztu + `HiddenComment` + kasowanie wiersza pending; lease; `BoundedSemaphore(4)`
+   (§14 #2); kształt ~60 testów `process_comment`. `TimeoutError` mapuje się na istniejący
+   `_enqueue_pending("classifier_unavailable")` — **zero nowej semantyki awarii**.
+   **Cena, świadomie zapłacona:** wątek jest trzymany przez czas rundy busa zamiast ~15 s
+   (`classifier.py:142`), a `BoundedSemaphore(4)` znaczy, że cztery wolne joby wstrzymują
+   klasyfikację. Dlatego `BUS_TIMEOUT_S < CLAIM_LEASE` jest **twardym** wymogiem (§8), a nie
+   strojeniem. Odrzucone: **callback** (przebudowa prodowej ścieżki + dziura z (a)),
+   **callback z fallbackiem na poll** (obie ścieżki i oba komplety testów — najwięcej pracy,
+   uzasadnione dopiero gdy odczepienie latencji zacznie być realnie potrzebne).
+   **Konsekwencja dla §3/§14 #1:** „generyczny worker" z #1 stoi bez zmian; to **wyłącznie**
+   wybór sposobu dostawy dla pilota. Gdy pojawi się konsument, który naprawdę nie może czekać
+   (batch news?), callback jest gotowy i nieużywany, nie do napisania.
