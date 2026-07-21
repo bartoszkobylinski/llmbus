@@ -28,6 +28,7 @@ import hmac
 import logging
 import random
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from llmbus.cost import cost_usd
@@ -55,6 +56,11 @@ async def _default_apply_timeout(
     return await asyncio.wait_for(call, timeout_s)
 
 
+def _utcnow() -> datetime:
+    """Current UTC time — the default clock for deadline checks (§14 #22)."""
+    return datetime.now(timezone.utc)
+
+
 @dataclasses.dataclass(frozen=True)
 class WorkerDeps:
     """Everything `process_job` needs, injected as one bundle.
@@ -74,6 +80,42 @@ class WorkerDeps:
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     rand: Callable[[], float] = random.random
     apply_timeout: TimeoutRunner = _default_apply_timeout
+    # Injected so deadline handling is testable without real time passing.
+    now: Callable[[], datetime] = _utcnow
+
+
+def _expired_result(job: Job, provider_name: str, attempt: int) -> Result:
+    """The terminal `Result` for a job abandoned before it was ever called.
+
+    An error, not a silent drop: the store row must reach a terminal state or a
+    producer still polling it would wait out its own timeout for a job nobody
+    will ever run, and the pending count (§11) would drift upward forever.
+    """
+    return result_error(
+        job,
+        provider_name,
+        f"expired before attempt {attempt + 1}: the producer's {job.ttl_s}s deadline "
+        "elapsed while this job was queued, so it was dropped unrun rather than billed",
+    )
+
+
+def is_expired(job: Job, now: datetime) -> bool:
+    """True once `job.ttl_s` has elapsed since `submitted_at` (§14 #22).
+
+    The worker checks this instead of trusting that a queued job is still
+    wanted. With one partition consumed serially (§5), a job can sit behind
+    others for far longer than the producer that submitted it is willing to
+    wait — and a producer that has given up re-queues its work under a fresh
+    `job_id`. Executing the abandoned original then bills the same unit of work
+    twice, which is a cost bug no wait-budget arithmetic on the producer's side
+    can prevent: the queue depth it would have to bound is global, and no single
+    producer can see it.
+
+    `ttl_s is None` means no deadline — never expires.
+    """
+    if job.ttl_s is None:
+        return False
+    return now >= job.submitted_at + timedelta(seconds=job.ttl_s)
 
 
 def estimate_tokens(job: Job, default_output_tokens: int) -> int:
@@ -154,7 +196,18 @@ async def _call_with_retry(deps: WorkerDeps, job: Job, provider: Provider, estim
     # leave as a survivor. `attempt` strictly increases and the guard bounds it at
     # `max_attempts`, so this always terminates.
     while True:
+        # Checked twice per attempt, for two different reasons. Before
+        # `acquire`, so an expired job does not reserve provider quota that a
+        # live job needs — under a backlog most queued jobs may be expired, and
+        # reserving for all of them would starve the ones still wanted. After
+        # `acquire`, because that call can sleep for a long time (a drained
+        # bucket waits out the window), and this is the last point before money
+        # is spent.
+        if is_expired(job, deps.now()):
+            return _expired_result(job, provider.name, attempt)
         await deps.rate_limiter.acquire(provider.name, estimate)
+        if is_expired(job, deps.now()):
+            return _expired_result(job, provider.name, attempt)
         try:
             call = await deps.apply_timeout(
                 provider.call(job.model, job.messages, job.params),

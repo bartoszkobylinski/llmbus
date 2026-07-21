@@ -130,6 +130,20 @@ class Job(BaseModel):
     callback_url: str | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
     submitted_at: datetime = Field(default_factory=_utcnow)
+    # How long this job stays worth doing, in seconds after `submitted_at`
+    # (§14 #22). The worker refuses an expired job instead of calling the
+    # provider, so work the producer has already given up on is never paid for.
+    #
+    # Relative rather than an absolute timestamp because `submitted_at` is
+    # already in the contract, so a producer states one number and the two sides
+    # need not agree on anything except that clock.
+    #
+    # `None` means no deadline: the worker runs it whenever it gets to it. That
+    # is the right default for batch producers who will collect the result
+    # later, and the wrong one for a producer polling with its own timeout —
+    # that producer should set this to its own wait, so the two give up together
+    # (§8).
+    ttl_s: float | None = Field(default=None, gt=0)
 
 
 class Usage(BaseModel):

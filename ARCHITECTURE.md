@@ -72,7 +72,8 @@ Kroki:
              // temperature opcjonalne; response_format opcjonalne (null = wolny tekst), §14 #10
   "callback_url": "http://…/internal/classified",   // albo null → poll
   "meta": {"comment_id": "…"},                        // wraca nietknięte
-  "submitted_at": "…"
+  "submitted_at": "…",
+  "ttl_s": 280.0                                      // opcjonalne; null = bez terminu, §14 #22
 }
 ```
 **Result (store + callback):**
@@ -86,6 +87,7 @@ Kroki:
 - **`job_id` musi być poprawnym UUID** (generowany jako `uuid4`), **normalizowany do postaci kanonicznej** (lowercase, z myślnikami) — to klucz w store i podstawa idempotencji/dedupu (§6). Warianty tego samego UUID (uppercase, `urn:uuid:…`, `{…}`) sprowadzamy do jednego klucza; pusty/„prosty"/z białymi znakami id jest odrzucany. Akceptujemy wyłącznie wejście typu `str` — `bytes`/inne typy odrzucane (`StrictStr`), żeby leniwa koercja nie przemyciła nie-stringa.
 - **`max_tokens` > 0** jeśli podane (nieprawidłowe u każdego providera). **`temperature` jest opcjonalne** (`null`/nieustawione = model używa swojej domyślnej) i nieograniczone w kontrakcie — obsługa i zakresy różnią się per model, więc waliduje je adapter providera (§7). Rodzina GPT-5 **odrzuca jakiekolwiek ustawione `temperature`** (§14 #9): adapter OpenAI zgłasza wtedy błąd **przed** wywołaniem API, zamiast cicho je gubić.
 - **`response_format` (structured output) — wyłącznie wariant `json_schema`** (§14 #10, ponownie otwarte i rozstrzygnięte 2026-07-17): `{"type": "json_schema", "name": str, "schema": {…}}` albo `null` (wolny tekst). Ten jeden kształt mapuje się natywnie na obu providerów (OpenAI `response_format` json_schema + `strict: true`; Anthropic `output_config.format`); luźny `json_object` to koncept tylko-OpenAI i celowo NIE wchodzi. Walidacja wczesna (fail-loud): `schema` musi być niepustym schematem obiektu z top-level `additionalProperties: false` — tego wymagają strict-mode OBU providerów, więc odrzucamy przy submit, nie po zakolejkowaniu. Głębsza poprawność schematu i reguły znaków w `name` (wymóg OpenAI; Anthropic pola nie ma — adapter je pomija) zostają po stronie providera. W Pythonie pole nazywa się `json_schema` (`schema` cieniuje atrybut `BaseModel`), na drucie `schema` (`by_alias=True`).
+- **`ttl_s` (termin ważności joba) — opcjonalny, `> 0` jeśli podany** (§14 #22). Liczony **względem `submitted_at`**, nie jako absolutny timestamp: `submitted_at` już jest w kontrakcie, więc producent podaje jedną liczbę i obie strony nie muszą uzgadniać nic poza tym zegarem. Worker sprawdza termin **przed każdą próbą** — raz przed rezerwacją rate-limitu (żeby martwy job nie zjadał kwoty potrzebnej żywym) i raz po niej, tuż przed wydaniem pieniędzy (bo `acquire` potrafi przespać całe okno). Job po terminie kończy się **terminalnym `Result` `status="error"`**, nie cichym pominięciem: wiersz w store musi osiągnąć stan terminalny, inaczej producent, który jeszcze pollinguje, wisiałby do własnego timeoutu, a licznik `pending` (§11) rósłby w nieskończoność. `null` = brak terminu (batch — wynik odbierany później); producent pollingujący z własnym timeoutem **powinien** ustawić `ttl_s` równe swojemu czekaniu, żeby obie strony poddawały się razem.
 
 **Uwaga o nagłówkach Iggy:** metadane (`project`, `model`, `priority`) logicznie należą do **nagłówków wiadomości**, ale Python SDK ich nie ma → w v1 wszystko idzie w body JSON. To jest dokładnie miejsce na ewentualną rozbudowę SDK (nagłówki).
 
@@ -583,6 +585,36 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    monitorować i odblokowuje ograniczenie „`WORKER_*` jest globalny dla workera" z §8), ale to
    zmiana kontraktu godzinę po pierwszym ruchu produkcyjnym. Zostaje jako następny krok, gdy
    pojawi się drugi konsument o innym profilu latencji.
+22. **Bezpieczeństwo kosztowe polla: kto pilnuje, żeby nie zapłacić dwa razy?**
+   **ROZSTRZYGNIĘTE (2026-07-22) — `Job.ttl_s`: worker ODMAWIA joba po terminie,
+   zamiast producenta zgadującego kolejkę.**
+   **Dlaczego #21 nie wystarczyło (review to udowodnił, nie wydedukował):**
+   (a) `retry_budget_seconds` **nie jest** ograniczeniem czasu zajętości workera —
+   `processing.py` czeka jeszcze w `RateLimiter.acquire` przed **każdą** próbą, a tego
+   nie da się ograniczyć statycznie: zależy od stanu kubełka, czyli od wszystkich innych
+   jobów (repro: limit 60/min → następny job śpi ~60 s). Poprzedni docstring twierdził, że
+   to prawdziwy ceiling — **to było fałszywe** i jest teraz zapisane jako przetestowany fakt
+   (`test_retry_budget_deliberately_excludes_the_rate_limit_wait`).
+   (b) Producent liczył `concurrency × per_job`, ale `concurrency` to limit **jednego
+   procesu**. hate-mod ma **dwa** procesy sięgające `classify()` (uvicorn + cron
+   `drain_queue`), każdy z własnym semaforem, a na busie mogą stać joby innych producentów.
+   Realnie: 2 × 4 = 8 równoległych → 8 × 60,5 = 484 s przy „bezpiecznym" czekaniu 280 s.
+   **Żaden producent nie ograniczy własnego czekania z lokalnej informacji**, bo głębokość
+   kolejki jest globalna.
+   **Rozwiązanie odwraca kierunek:** zamiast przewidywać kolejkę, producent deklaruje termin
+   (`ttl_s`, względem `submitted_at`, §4), a worker sprawdza go przed każdą próbą i **nie
+   dzwoni do providera** po terminie. Wtedy zły budżet czekania kosztuje **ponowne
+   zakolejkowanie, a nie drugą płatność** — bo pracy porzuconej nikt już nie opłaca.
+   Resztkowa ekspozycja: job, który wygasa **w trakcie** lotu, ograniczona jedną próbą,
+   a nie głębokością kolejki.
+   **Status #21:** publikacja polityki **zostaje**, ale zdegradowana — pole nazywa się teraz
+   uczciwie `retry_budget_s`, a po stronie konsumenta check jest **doradczy** (warunek
+   konieczny, nie wystarczający) i służy widoczności operacyjnej. Bezpieczeństwo kosztowe
+   daje #22, nie #21.
+   **Uwaga produkcyjna:** ekspozycja była **realna na prodzie** między 2026-07-21 (włączenie
+   busa) a wdrożeniem tego PR-a: `LLMBUS_TIMEOUT_SECONDS=280` przy 8 możliwych równoległych
+   jobach. Skala mała (~$0,001 za dotknięty komentarz, tylko przy zbiegu burstu z cronem),
+   ale realna — nie zamiatać.
 20. **Dostawa werdyktu do pilota: callback czy poll?** **ROZSTRZYGNIĘTE (2026-07-21) — POLL
    (`await_result`), nie callback; potwierdzone przez usera.** Bus wspiera oba (§14 #7) i
    callback jest po stronie workera gotowy wraz z HMAC (§14 #19) — pilot go po prostu **nie

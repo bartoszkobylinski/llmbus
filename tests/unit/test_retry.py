@@ -11,12 +11,13 @@ import asyncio
 
 import pytest
 
+from llmbus.ratelimit import ProviderLimits, RateLimiter
 from llmbus.retry import (
     RetryPolicy,
     WorkerPolicy,
     backoff_delay,
     is_retryable,
-    worst_case_seconds,
+    retry_budget_seconds,
 )
 
 # --- RetryPolicy validation --------------------------------------------------
@@ -205,7 +206,7 @@ def test_backoff_rejects_negative_index():
         backoff_delay(-1, _backoff_policy(), rand=1.0)
 
 
-# --- worst_case_seconds (§14 #21) --------------------------------------------
+# --- retry_budget_seconds (§14 #21) --------------------------------------------
 #
 # This is the number a polling producer sizes its wait against, so the
 # arithmetic is pinned exactly rather than by inequality: every case below is a
@@ -225,38 +226,38 @@ def _worker(max_attempts, job_timeout_s, base_delay_s=0.5, max_delay_s=30.0):
 def test_single_attempt_has_no_backoff_at_all():
     # max_attempts=1 means no retry, so the bound is exactly one timeout. This
     # also pins the retry COUNT: an off-by-one would add a spurious backoff.
-    assert worst_case_seconds(_worker(max_attempts=1, job_timeout_s=30)) == 30.0
+    assert retry_budget_seconds(_worker(max_attempts=1, job_timeout_s=30)) == 30.0
 
 
 def test_stock_worker_bound_is_exact():
     # 4 x 60s of attempts + backoffs 0.5 + 1 + 2 (three retries) = 243.5.
-    assert worst_case_seconds(_worker(max_attempts=4, job_timeout_s=60)) == 243.5
+    assert retry_budget_seconds(_worker(max_attempts=4, job_timeout_s=60)) == 243.5
 
 
 def test_tuned_worker_bound_is_exact():
     # The deployed pilot budget: 2 x 30s + a single 0.5s backoff.
-    assert worst_case_seconds(_worker(max_attempts=2, job_timeout_s=30)) == 60.5
+    assert retry_budget_seconds(_worker(max_attempts=2, job_timeout_s=30)) == 60.5
 
 
 def test_backoff_doubles_per_retry():
     # base 1s, cap high enough never to bind: 1 + 2 + 4 = 7 over three retries.
     # Pins the exponential growth; a linear or constant backoff misses this.
     policy = _worker(max_attempts=4, job_timeout_s=10, base_delay_s=1.0, max_delay_s=1000.0)
-    assert worst_case_seconds(policy) == 40.0 + 7.0
+    assert retry_budget_seconds(policy) == 40.0 + 7.0
 
 
 def test_backoff_is_capped_per_retry_not_in_total():
     # base 10, cap 15, three retries: 10 + 15 + 15 = 40, NOT 10 + 20 + 40 = 70
     # (uncapped) and NOT 15 (a total cap). Kills min/max confusion.
     policy = _worker(max_attempts=4, job_timeout_s=1, base_delay_s=10.0, max_delay_s=15.0)
-    assert worst_case_seconds(policy) == 4.0 + 40.0
+    assert retry_budget_seconds(policy) == 4.0 + 40.0
 
 
 def test_attempts_multiply_the_timeout():
     # Every attempt can burn the full per-attempt timeout, so the timeout term
     # scales with attempts rather than being counted once.
-    one = worst_case_seconds(_worker(max_attempts=1, job_timeout_s=7))
-    three = worst_case_seconds(_worker(max_attempts=3, job_timeout_s=7))
+    one = retry_budget_seconds(_worker(max_attempts=1, job_timeout_s=7))
+    three = retry_budget_seconds(_worker(max_attempts=3, job_timeout_s=7))
     assert one == 7.0
     assert three == 21.0 + 1.5  # 3 x 7 + backoffs 0.5 + 1
 
@@ -267,4 +268,53 @@ def test_bound_covers_the_real_jittered_backoff():
     # the worst the actual backoff function can produce, rand=1.0.
     policy = _worker(max_attempts=5, job_timeout_s=2)
     realised = sum(backoff_delay(i, policy.retry, rand=1.0) for i in range(4))
-    assert worst_case_seconds(policy) == 5 * 2 + realised
+    assert retry_budget_seconds(policy) == 5 * 2 + realised
+
+
+def test_bound_matches_backoff_at_and_beyond_the_cap_boundary():
+    policy = _worker(
+        max_attempts=5,
+        job_timeout_s=3,
+        base_delay_s=2.0,
+        max_delay_s=8.0,
+    )
+
+    assert [backoff_delay(i, policy.retry, rand=1.0) for i in range(4)] == [
+        2.0,
+        4.0,
+        8.0,
+        8.0,
+    ]
+    assert retry_budget_seconds(policy) == 5 * 3 + 2 + 4 + 8 + 8
+
+
+async def test_retry_budget_deliberately_excludes_the_rate_limit_wait():
+    """The rate-limit wait is REAL and is NOT in the budget — pinned on purpose.
+
+    Evidence (from review): processing.py awaits RateLimiter.acquire before every
+    attempt, and a drained bucket sleeps out the window. So actual occupancy can
+    exceed retry_budget_seconds by an amount that has no static ceiling — it
+    depends on the bucket, which depends on every other job.
+
+    This asserts the SHORTFALL rather than a bound, so nobody re-reads the name
+    as a guarantee. Cost safety is Job.ttl_s (§14 #22): the worker refuses an
+    expired job, which needs no prediction of queueing at all.
+    """
+    sleeps: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    limiter = RateLimiter(
+        {"openai": ProviderLimits(requests_per_min=60, tokens_per_min=60)},
+        clock=lambda: 0.0,
+        sleep=record_sleep,
+    )
+    await limiter.acquire("openai", 60)
+    await limiter.acquire("openai", 60)
+    policy = _worker(max_attempts=1, job_timeout_s=1)
+
+    assert sleeps == [60.0]
+    real_occupancy = sleeps[0] + policy.job_timeout_s
+    assert retry_budget_seconds(policy) == 1.0
+    assert retry_budget_seconds(policy) < real_occupancy

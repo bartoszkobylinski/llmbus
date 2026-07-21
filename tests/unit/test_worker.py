@@ -8,9 +8,12 @@ over a fake (duck-typed) client, `_consume_one` (decode → process, poison drop
 mutation gate but still owes coverage.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -31,6 +34,7 @@ from llmbus.worker import (
     decode_job,
     ensure_topology,
     make_callback_sender,
+    run_worker,
 )
 
 # --- fakes -------------------------------------------------------------------
@@ -568,3 +572,75 @@ def test_load_parses_config_and_worker_policy():
     assert connect.max_attempts == 10
     assert connect.base_delay_s == 0.25
     assert connect.max_delay_s == 5
+
+
+async def test_run_worker_publishes_policy_before_entering_consume(monkeypatch, tmp_path):
+    store_path = str(tmp_path / "worker.db")
+    observed = []
+
+    class ObservingConsumer:
+        async def consume_messages(self, _on_message, _shutdown):
+            async with Store(store_path) as producer_store:
+                observed.append(await producer_store.read_worker_policy())
+
+    class ObservingIggy(FakeIggyClient):
+        async def connect(self):
+            return None
+
+        async def consumer_group(self, *_args, **_kwargs):
+            return ObservingConsumer()
+
+    class ExternalClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def aclose(self):
+            return None
+
+    iggy = ObservingIggy(stream=object(), topic=object())
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(AsyncClient=ExternalClient),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "openai",
+        SimpleNamespace(AsyncOpenAI=ExternalClient),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "anthropic",
+        SimpleNamespace(AsyncAnthropic=ExternalClient),
+    )
+    monkeypatch.setattr(
+        "llmbus.worker.IggyClient.from_connection_string",
+        lambda _connection_string: iggy,
+    )
+    env = {
+        "OPENAI_API_KEY": "sk-o",
+        "ANTHROPIC_API_KEY": "sk-a",
+        "OPENAI_RPM": "500",
+        "OPENAI_TPM": "200000",
+        "ANTHROPIC_RPM": "50",
+        "ANTHROPIC_TPM": "40000",
+        "IGGY_ADDRESS": "127.0.0.1:8090",
+        "IGGY_USERNAME": "iggy",
+        "IGGY_PASSWORD": "iggy",
+        "STORE_PATH": store_path,
+        "WORKER_MAX_ATTEMPTS": "2",
+        "WORKER_BACKOFF_BASE_S": "0.5",
+        "WORKER_BACKOFF_MAX_S": "30",
+        "WORKER_JOB_TIMEOUT_S": "30",
+        "WORKER_DEFAULT_OUTPUT_TOKENS": "512",
+        "WORKER_CONNECT_MAX_ATTEMPTS": "1",
+        "WORKER_CONNECT_BACKOFF_BASE_S": "0.25",
+        "WORKER_CONNECT_BACKOFF_MAX_S": "5",
+    }
+
+    await run_worker(env, shutdown=asyncio.Event())
+
+    assert len(observed) == 1
+    assert observed[0] is not None
+    assert observed[0].max_attempts == 2
+    assert observed[0].retry_budget_s == 60.5

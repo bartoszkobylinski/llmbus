@@ -526,5 +526,5 @@ async def test_worker_policy_reads_back_what_the_worker_published():
     assert published is not None
     # The producer's whole reason for asking: size a wait against this bound
     # instead of hardcoding a belief about the worker's .env.
-    assert published.worst_case_s == 60.5
+    assert published.retry_budget_s == 60.5
     assert published.max_attempts == 2

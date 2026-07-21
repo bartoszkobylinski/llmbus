@@ -31,7 +31,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from llmbus.retry import WorkerPolicy, worst_case_seconds
+from llmbus.retry import WorkerPolicy, retry_budget_seconds
 from llmbus.schema import Job, Result, Usage
 
 # The store-only initial state; terminal statuses ("ok"/"error") mirror `Result`.
@@ -56,18 +56,19 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
 
 -- The worker's effective run policy, republished on every worker boot (§14 #21).
--- A polling producer sizes its wait against what the worker can actually do, so
--- it needs that number as a FACT rather than as a constant copied into its own
--- config, where it goes stale silently and the failure mode is paying twice.
+-- Operator visibility into what the running worker is configured with, plus a
+-- necessary-but-not-sufficient signal for a polling producer's wait.
+-- `retry_budget_s` EXCLUDES the rate-limiter wait (no static ceiling), so it is
+-- not a guarantee — cost safety is `Job.ttl_s` (§14 #22).
 -- Single row: `id` is pinned to 1, so a boot overwrites rather than accumulates.
 CREATE TABLE IF NOT EXISTS worker_policy (
-    id            INTEGER PRIMARY KEY CHECK (id = 1),
-    max_attempts  INTEGER NOT NULL,
-    job_timeout_s REAL    NOT NULL,
-    base_delay_s  REAL    NOT NULL,
-    max_delay_s   REAL    NOT NULL,
-    worst_case_s  REAL    NOT NULL,
-    updated_at    TEXT    NOT NULL
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    max_attempts   INTEGER NOT NULL,
+    job_timeout_s  REAL    NOT NULL,
+    base_delay_s   REAL    NOT NULL,
+    max_delay_s    REAL    NOT NULL,
+    retry_budget_s REAL    NOT NULL,
+    updated_at     TEXT    NOT NULL
 );
 """
 
@@ -116,18 +117,21 @@ class ProjectDayCost:
 class PublishedWorkerPolicy:
     """What the running worker published about its own run policy (§14 #21).
 
-    `worst_case_s` is the number a polling producer actually needs: the ceiling
-    on how long one job can occupy the worker. The inputs are carried alongside
-    it so an operator reading the store can see *why* it is that value, and
-    `updated_at` shows which boot published it — a value from a worker that has
-    since been reconfigured is detectable rather than merely wrong.
+    `retry_budget_s` covers attempts and backoff only — it EXCLUDES the
+    rate-limiter wait before each attempt, which has no static ceiling (see
+    `retry.retry_budget_seconds`). It is therefore a necessary-but-not-sufficient
+    signal for a producer's wait, not a guarantee; cost safety comes from
+    `Job.ttl_s` (§14 #22). The inputs are carried alongside it so an operator can
+    see why it is that value, and `updated_at` shows which boot published it, so
+    a value from a since-reconfigured worker is detectable rather than merely
+    wrong.
     """
 
     max_attempts: int
     job_timeout_s: float
     base_delay_s: float
     max_delay_s: float
-    worst_case_s: float
+    retry_budget_s: float
     updated_at: datetime
 
 
@@ -288,7 +292,7 @@ class Store:
         await self._conn.execute(
             """
             INSERT INTO worker_policy
-                (id, max_attempts, job_timeout_s, base_delay_s, max_delay_s, worst_case_s,
+                (id, max_attempts, job_timeout_s, base_delay_s, max_delay_s, retry_budget_s,
                  updated_at)
             VALUES (1, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
@@ -296,7 +300,7 @@ class Store:
                 job_timeout_s = excluded.job_timeout_s,
                 base_delay_s  = excluded.base_delay_s,
                 max_delay_s   = excluded.max_delay_s,
-                worst_case_s  = excluded.worst_case_s,
+                retry_budget_s  = excluded.retry_budget_s,
                 updated_at    = excluded.updated_at
             """,
             (
@@ -304,7 +308,7 @@ class Store:
                 policy.job_timeout_s,
                 policy.retry.base_delay_s,
                 policy.retry.max_delay_s,
-                worst_case_seconds(policy),
+                retry_budget_seconds(policy),
                 stamped.isoformat(),
             ),
         )
@@ -328,7 +332,7 @@ class Store:
             job_timeout_s=float(row["job_timeout_s"]),
             base_delay_s=float(row["base_delay_s"]),
             max_delay_s=float(row["max_delay_s"]),
-            worst_case_s=float(row["worst_case_s"]),
+            retry_budget_s=float(row["retry_budget_s"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 

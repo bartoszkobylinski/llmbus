@@ -21,6 +21,7 @@ from llmbus.processing import (
     callback_headers,
     callback_signature,
     estimate_tokens,
+    is_expired,
     process_job,
     result_error,
     result_ok,
@@ -658,3 +659,142 @@ async def test_default_apply_timeout_raises_on_a_slow_call():
 
     with pytest.raises(asyncio.TimeoutError):
         await _default_apply_timeout(slow(), 0.01)
+
+
+# --- deadlines: Job.ttl_s (§14 #22) ------------------------------------------
+#
+# The producer states how long its work stays wanted; the worker refuses an
+# expired job instead of calling the provider. This is what makes cost safety
+# independent of any queueing prediction: with one serial partition and several
+# independent producers, no producer can bound its own wait from local
+# information, so the only reliable protection is not paying for work that has
+# already been abandoned.
+
+_T0 = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _at(seconds):
+    from datetime import timedelta
+
+    return _T0 + timedelta(seconds=seconds)
+
+
+def test_a_job_without_a_deadline_never_expires():
+    # Batch producers collect results whenever; they must not be dropped.
+    assert is_expired(make_job(submitted_at=_T0, ttl_s=None), _at(10_000)) is False
+
+
+def test_a_job_inside_its_deadline_is_live():
+    assert is_expired(make_job(submitted_at=_T0, ttl_s=60), _at(59.9)) is False
+
+
+def test_the_deadline_is_inclusive_at_the_boundary():
+    # Exactly at the deadline counts as expired: the producer has stopped waiting.
+    assert is_expired(make_job(submitted_at=_T0, ttl_s=60), _at(60)) is True
+
+
+def test_a_job_past_its_deadline_is_expired():
+    assert is_expired(make_job(submitted_at=_T0, ttl_s=60), _at(60.1)) is True
+
+
+async def test_an_expired_job_is_never_sent_to_the_provider(tmp_path):
+    """The whole point: no provider call, so no charge for abandoned work."""
+    store = Store(str(tmp_path / "s.db"))
+    await store.connect()
+    provider = FakeProvider("openai", [ok_result()])
+    job = make_job(submitted_at=_T0, ttl_s=30)
+    await store.insert_pending(job)
+    result = await process_job(
+        build_deps(store, provider, now=lambda: _at(31)),
+        job,
+    )
+    assert provider.calls == []
+    assert result.status == "error"
+    # Attributed to the provider it WOULD have gone to — an expired job is a
+    # dropped provider call, not a routing failure, and the ledger should say so.
+    assert result.provider == "openai"
+    assert result.error == (
+        "expired before attempt 1: the producer's 30.0s deadline elapsed while this "
+        "job was queued, so it was dropped unrun rather than billed"
+    )
+    await store.close()
+
+
+async def test_an_expired_job_does_not_reserve_rate_limit_budget(tmp_path):
+    """Checked BEFORE acquire too: under a backlog most queued jobs may be
+    expired, and reserving quota for them would starve the ones still wanted."""
+    store = Store(str(tmp_path / "s.db"))
+    await store.connect()
+    provider = FakeProvider("openai", [ok_result()])
+    job = make_job(submitted_at=_T0, ttl_s=30)
+    await store.insert_pending(job)
+    deps = build_deps(store, provider, now=lambda: _at(31))
+    await process_job(deps, job)
+    assert deps.rate_limiter.acquired == []
+    await store.close()
+
+
+async def test_an_expired_job_still_reaches_a_terminal_stored_state(tmp_path):
+    """It must not be silently dropped: a producer still polling would otherwise
+    wait out its own timeout, and the pending count (§11) would drift up forever."""
+    store = Store(str(tmp_path / "s.db"))
+    await store.connect()
+    job = make_job(submitted_at=_T0, ttl_s=30)
+    await store.insert_pending(job)
+    await process_job(
+        build_deps(store, FakeProvider("openai", [ok_result()]), now=lambda: _at(31)), job
+    )
+    stored = await store.get(job.job_id)
+    assert stored is not None
+    assert stored.is_terminal
+    assert stored.status == "error"
+    await store.close()
+
+
+async def test_a_live_job_is_processed_normally(tmp_path):
+    store = Store(str(tmp_path / "s.db"))
+    await store.connect()
+    provider = FakeProvider("openai", [ok_result()])
+    job = make_job(submitted_at=_T0, ttl_s=300)
+    await store.insert_pending(job)
+    result = await process_job(build_deps(store, provider, now=lambda: _at(5)), job)
+    assert len(provider.calls) == 1
+    assert result.status == "ok"
+    await store.close()
+
+
+async def test_a_job_that_expires_while_waiting_on_the_rate_limiter_is_dropped(tmp_path):
+    """The second check earns its place here. acquire() can sleep out a whole
+    window, and that wait is exactly what retry_budget_seconds cannot bound — so
+    the deadline has to be re-read after it, immediately before spending money."""
+    store = Store(str(tmp_path / "s.db"))
+    await store.connect()
+    provider = FakeProvider("openai", [ok_result()])
+    job = make_job(submitted_at=_T0, ttl_s=30)
+    await store.insert_pending(job)
+
+    clock = iter([_at(1), _at(31)])  # live at the first check, expired after acquire
+
+    result = await process_job(
+        build_deps(store, provider, now=lambda: next(clock)),
+        job,
+    )
+    assert provider.calls == []
+    assert result.status == "error"
+    assert result.provider == "openai"
+    assert result.error == (
+        "expired before attempt 1: the producer's 30.0s deadline elapsed while this "
+        "job was queued, so it was dropped unrun rather than billed"
+    )
+    await store.close()
+
+
+def test_the_default_clock_is_timezone_aware_utc():
+    """WorkerDeps' default `now`. Tests inject a clock, so without this the real
+    one ships unexercised — and a naive datetime here would raise on comparison
+    against the job's tz-aware `submitted_at`."""
+    from llmbus.processing import _utcnow
+
+    stamped = _utcnow()
+    assert stamped.tzinfo is timezone.utc
+    assert abs((datetime.now(timezone.utc) - stamped).total_seconds()) < 5

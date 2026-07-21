@@ -599,7 +599,7 @@ async def test_publish_then_read_round_trips_every_field(tmp_path):
             job_timeout_s=30.0,
             base_delay_s=0.5,
             max_delay_s=30.0,
-            worst_case_s=60.5,
+            retry_budget_s=60.5,
             updated_at=_SUBMITTED,
         )
 
@@ -611,7 +611,7 @@ async def test_published_worst_case_is_derived_not_supplied(tmp_path):
         await store.publish_worker_policy(_policy(max_attempts=4, job_timeout_s=60.0))
         published = await store.read_worker_policy()
         assert published is not None
-        assert published.worst_case_s == 243.5
+        assert published.retry_budget_s == 243.5
 
 
 async def test_republishing_overwrites_rather_than_accumulating(tmp_path):
@@ -622,9 +622,46 @@ async def test_republishing_overwrites_rather_than_accumulating(tmp_path):
         await store.publish_worker_policy(_policy(max_attempts=2, job_timeout_s=30.0))
         published = await store.read_worker_policy()
         assert published is not None
-        assert (published.max_attempts, published.worst_case_s) == (2, 60.5)
+        assert (published.max_attempts, published.retry_budget_s) == (2, 60.5)
         cursor = await store._conn.execute("SELECT COUNT(*) FROM worker_policy")
         assert (await cursor.fetchone())[0] == 1
+
+
+async def test_republish_is_visible_as_one_complete_new_row_to_an_existing_reader(
+    tmp_path,
+):
+    path = _db(tmp_path)
+    first_boot = datetime(2026, 7, 21, 8, 0, tzinfo=timezone.utc)
+    second_boot = datetime(2026, 7, 21, 9, 0, tzinfo=timezone.utc)
+    async with Store(path) as worker, Store(path) as producer:
+        await worker.publish_worker_policy(
+            _policy(max_attempts=4, job_timeout_s=60.0),
+            updated_at=first_boot,
+        )
+        before = await producer.read_worker_policy()
+
+        await worker.publish_worker_policy(
+            _policy(max_attempts=2, job_timeout_s=30.0),
+            updated_at=second_boot,
+        )
+        after = await producer.read_worker_policy()
+
+    assert before == PublishedWorkerPolicy(
+        max_attempts=4,
+        job_timeout_s=60.0,
+        base_delay_s=0.5,
+        max_delay_s=30.0,
+        retry_budget_s=243.5,
+        updated_at=first_boot,
+    )
+    assert after == PublishedWorkerPolicy(
+        max_attempts=2,
+        job_timeout_s=30.0,
+        base_delay_s=0.5,
+        max_delay_s=30.0,
+        retry_budget_s=60.5,
+        updated_at=second_boot,
+    )
 
 
 async def test_publish_stamps_the_current_time_by_default(tmp_path):

@@ -86,21 +86,30 @@ class WorkerPolicy:
         _validate_worker_policy(self.job_timeout_s, self.default_output_tokens)
 
 
-def worst_case_seconds(policy: WorkerPolicy) -> float:
-    """Upper bound on how long ONE job can occupy the worker (§8, §14 #21).
+def retry_budget_seconds(policy: WorkerPolicy) -> float:
+    """Time one job can spend in ATTEMPTS AND BACKOFF (§14 #21).
 
     Every attempt can burn its full `job_timeout_s`, and each retry waits its
     backoff first. Jitter only ever shortens a wait (`backoff_delay` scales the
-    capped delay by a draw in [0, 1)), so summing the **uncapped-by-jitter**
-    delays is a true ceiling, not an average.
+    capped delay by a draw in [0, 1)), so summing the un-jittered delays bounds
+    that part exactly.
 
-    This exists because a producer polling for a result must size its wait
-    against what the worker can actually do. Left as a number in the consumer's
-    config it is a *belief* about this process's `.env`, and a belief that goes
-    stale silently: too short and the producer abandons a job the worker later
-    completes into the store unread, so the retry pays for a fresh `job_id`
-    (§14 #21). Publishing it (`store.publish_worker_policy`) makes it a fact the
-    consumer can read back.
+    **This is NOT a bound on how long a job occupies the worker, and must not be
+    used as one.** `processing.py` also awaits `RateLimiter.acquire` before every
+    attempt, and that wait is excluded here — deliberately, because it cannot be
+    bounded statically: it depends on the token bucket's state, which depends on
+    every other job the worker has run. A drained bucket can sleep out a whole
+    window (a 60/min limit stalls the next job ~60s) with no ceiling this
+    function could compute. An earlier version of this docstring claimed a true
+    occupancy bound; that claim was wrong and is the reason the deadline in
+    §14 #22 exists.
+
+    So what is it for? Two honest uses: operator visibility into the retry
+    budget a worker is running with, and a NECESSARY-but-not-sufficient check —
+    a producer whose wait is already shorter than this cannot possibly be safe,
+    even though clearing it does not prove safety. Cost safety comes from
+    `Job.ttl_s` (§14 #22), where the worker refuses an expired job instead of
+    the producer trying to predict queueing it cannot see.
 
     Pure, so the arithmetic sits in the mutation gate rather than behind a live
     worker.
