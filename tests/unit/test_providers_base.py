@@ -29,13 +29,29 @@ _EXPECTED_ROUTES = {
 # --- Routing table -----------------------------------------------------------
 
 
+def _assert_routes_match_documented_table(routes):
+    assert routes == _EXPECTED_ROUTES
+
+
 def test_routing_table_matches_documented_routes():
-    assert PROVIDERS == _EXPECTED_ROUTES
+    _assert_routes_match_documented_table(PROVIDERS)
+
+
+def test_routing_table_canary_rejects_a_rehomed_model():
+    wrong_routes = dict(PROVIDERS)
+    wrong_routes["gpt-5.4-mini"] = "anthropic"
+
+    with pytest.raises(AssertionError):
+        _assert_routes_match_documented_table(wrong_routes)
 
 
 @pytest.mark.parametrize(("model", "provider"), sorted(_EXPECTED_ROUTES.items()))
 def test_provider_for_routes_each_model(model, provider):
     assert provider_for(model) == provider
+
+
+def test_gpt_5_4_mini_routes_to_openai():
+    assert provider_for("gpt-5.4-mini") == "openai"
 
 
 def test_provider_for_unknown_model_raises():

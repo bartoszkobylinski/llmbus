@@ -44,8 +44,22 @@ _DOCUMENTED_PRICING = MappingProxyType(
 # --- Pricing table (canary) --------------------------------------------------
 
 
+def _assert_pricing_matches_documented_history(pricing):
+    assert pricing == _DOCUMENTED_PRICING
+
+
 def test_pricing_table_matches_documented_history():
-    assert PRICING == _DOCUMENTED_PRICING
+    _assert_pricing_matches_documented_history(PRICING)
+
+
+def test_pricing_table_canary_rejects_a_mutated_rate():
+    wrong_pricing = dict(PRICING)
+    wrong_pricing["gpt-5.4-mini"] = (
+        PricePoint(date(2025, 1, 1), ModelPricing(Decimal("0.76"), Decimal("4.50"))),
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_pricing_matches_documented_history(wrong_pricing)
 
 
 @pytest.mark.parametrize(
@@ -54,6 +68,7 @@ def test_pricing_table_matches_documented_history():
         ("gpt-5", _TODAY, "1.25", "10.00"),
         ("gpt-5-mini", _TODAY, "0.25", "2.00"),
         ("gpt-5-nano", _TODAY, "0.05", "0.40"),
+        ("gpt-5.4-mini", _TODAY, "0.75", "4.50"),
         ("claude-opus-4-8", _TODAY, "5.00", "25.00"),
         ("claude-haiku-4-5", _TODAY, "1.00", "5.00"),
         # Sonnet 5 is date-dependent:
@@ -156,6 +171,11 @@ def test_cost_sums_input_and_output():
 def test_cost_scales_linearly_with_tokens():
     # 1000 * 0.25/1e6 + 500 * 2.00/1e6 = 0.00025 + 0.001
     assert cost_usd("gpt-5-mini", 1000, 500, _TODAY) == Decimal("0.00125")
+
+
+def test_gpt_5_4_mini_costs_mixed_tokens_at_documented_rate():
+    # 1000 * 0.75/1e6 + 500 * 4.50/1e6 = 0.00075 + 0.00225
+    assert cost_usd("gpt-5.4-mini", 1000, 500, date(2026, 7, 20)) == Decimal("0.00300")
 
 
 def test_cost_asymmetric_mixed_tokens():

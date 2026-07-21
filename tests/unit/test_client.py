@@ -24,6 +24,7 @@ from llmbus.client import (
     result_from_stored,
     send_job,
 )
+from llmbus.providers.base import UnknownModelError
 from llmbus.schema import Job, JobParams, Message, ResponseFormat, Result, Usage
 from llmbus.store import Store, StoredJob
 from llmbus.worker import DEFAULT_TOPOLOGY, Topology, decode_job
@@ -34,9 +35,10 @@ from llmbus.worker import DEFAULT_TOPOLOGY, Topology, decode_job
 class FakeIggyClient:
     """Records the producer/topology calls a `BusClient` makes; duck-types the SDK."""
 
-    def __init__(self, *, stream=None, topic=None):
+    def __init__(self, *, stream=None, topic=None, events=None):
         self._stream = stream
         self._topic = topic
+        self._events = events
         self.sent = []
         self.connected = False
         self.logins = []
@@ -51,6 +53,8 @@ class FakeIggyClient:
 
     async def send_messages(self, stream, topic, partition, messages):
         self.sent.append((stream, topic, partition, messages))
+        if self._events is not None:
+            self._events.append(("iggy.send_messages", messages))
 
     async def get_stream(self, name):
         return self._stream
@@ -69,6 +73,19 @@ class FailingSendIggyClient(FakeIggyClient):
     async def send_messages(self, stream, topic, partition, messages):
         await super().send_messages(stream, topic, partition, messages)
         raise RuntimeError("broker unavailable")
+
+
+class RecordingStore:
+    """Minimal submit-side store fake with an observable call record."""
+
+    def __init__(self, events):
+        self.events = events
+        self.inserted = []
+
+    async def insert_pending(self, job):
+        self.inserted.append(job)
+        self.events.append(("store.insert_pending", job))
+        return True
 
 
 # --- builders ----------------------------------------------------------------
@@ -290,6 +307,39 @@ async def test_poll_result_times_out_for_an_unknown_job_id():
 
 
 # --- BusClient.submit --------------------------------------------------------
+
+
+async def test_submit_unknown_model_has_no_store_or_iggy_side_effects():
+    events = []
+    store = RecordingStore(events)
+    iggy = FakeIggyClient(events=events)
+    bus = make_client(store, iggy)
+    job = make_job(model="unroutable-model")
+
+    with pytest.raises(UnknownModelError, match="unroutable-model"):
+        await bus.submit(job)
+
+    assert store.inserted == []
+    assert iggy.sent == []
+    assert events == []
+
+
+async def test_submit_known_model_writes_then_sends_and_returns_job_id():
+    events = []
+    store = RecordingStore(events)
+    iggy = FakeIggyClient(events=events)
+    bus = make_client(store, iggy)
+    job = make_job(model="gpt-5-nano")
+
+    returned = await bus.submit(job)
+
+    assert returned == job.job_id
+    assert store.inserted == [job]
+    assert len(iggy.sent) == 1
+    assert [name for name, _payload in events] == [
+        "store.insert_pending",
+        "iggy.send_messages",
+    ]
 
 
 async def test_submit_inserts_pending_then_sends_and_returns_job_id():
