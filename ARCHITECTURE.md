@@ -155,15 +155,31 @@ Interfejs `call(model, messages, params) -> {completion, usage}`; implementacje 
   **(dół)** musi być **większy** niż najgorszy przypadek workera — inaczej porzucamy job, który
   worker wciąż ponawia; ten kończy się potem sukcesem do store'a, którego już nikt nie czyta, a
   ponowienie wysyła **nowy `job_id`** i płaci drugi raz.
+  **KOREKTA (2026-07-21, po review Codeksa): dolna granica to NIE jest najgorszy przypadek
+  pojedynczego joba — to on razy GŁĘBOKOŚĆ KOLEJKI.** Pierwsza wersja tego akapitu liczyła
+  latencję per-job i to było **błędne**. Bus v1 ma **jedną partycję** i konsumuje **ściśle
+  szeregowo** (`worker.py:74` `partitions: int = 1`; `_handle_message` robi gołe
+  `await process_job` per wiadomość, commit-after-each), a hate-mod wysyła do
+  `max_concurrent_classifications` (4) jobów **naraz**. Ostatni z N równoległych submitów czeka
+  więc N najgorszych przypadków, nie jeden. Pełny warunek:
+  `concurrency × per_job_worst ≤ timeout < CLAIM_LEASE`.
   Stock worker (`WORKER_MAX_ATTEMPTS=4` × `WORKER_JOB_TIMEOUT_S=60` + backoff, §14 #11) daje
-  najgorszy przypadek **~275 s**, a lease wynosił 300 s → margines 25 s, czyli praktycznie brak.
-  **Rozstrzygnięte (2026-07-21, user): podnosimy `CLAIM_LEASE` hate-moda 5 → 10 min**
-  (`llmbus_timeout_seconds = 280`). Rozważane i odrzucone: skrócenie budżetu retry workera
-  (`WORKER_*` jest **globalny dla workera**, nie per-job — strojenie pod pilota obcięłoby
-  odporność każdemu przyszłemu konsumentowi) oraz per-job budżet w kontrakcie §4 (zmiana
-  kontraktu, blokuje pilota na pracy w busie; do rozważenia gdy pojawi się drugi konsument o
-  innym profilu latencji). Cena wybranego wariantu: zaorany worker hate-moda blokuje wiersz o
-  jeden cykl crona dłużej.
+  ~275 s/job → `4 × 275 = ~1100 s`, czego **żaden** timeout pod leasem nie spełnia. Sam lease
+  300 → 600 s tego nie ratował.
+  **Rozstrzygnięte (2026-07-21, user): tniemy człon per-job — worker dla tego wdrożenia dostaje
+  `WORKER_MAX_ATTEMPTS=2` i `WORKER_JOB_TIMEOUT_S=30` (~61 s/job).** Wtedy
+  `4 × 61 = 244 ≤ 280 < 600` domyka się z zapasem, a `CLAIM_LEASE` 10 min (podniesiony wcześniej)
+  zostaje. Założenie o worst-case workera mieszka teraz w **nazwanym ustawieniu**
+  `llmbus_worker_worst_case_seconds` po stronie hate-moda i jest **walidowane przy starcie**
+  (razem z resztą kontraktu enabled-mode), więc rozjazd wywala się przy boocie, a nie jako cicha
+  podwójna płatność pod obciążeniem.
+  **Uwaga — `WORKER_*` jest globalny dla workera, nie per-job:** drugi konsument odziedziczy 2
+  próby zamiast 4. Akceptowalne, dopóki hate-mod jest jedynym konsumentem; **to jest trigger do
+  rewizji** (wtedy: per-job budżet w kontrakcie §4 albo realna równoległość — więcej partycji /
+  współbieżny worker, co jest właściwym lekiem na niedopasowanie „równoległy producent ↔
+  szeregowy konsument", a nie budżet obchodzący problem). Rozważone i odrzucone teraz:
+  serializacja submitów po stronie hate-moda (działa, ale różnicuje zachowanie ścieżki busowej
+  pod obciążeniem) oraz równoległość w busie (osobny PR + własna bramka, blokuje pilota).
 
 ## 9. Struktura repo (propozycja)
 ```
