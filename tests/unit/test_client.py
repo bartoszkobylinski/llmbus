@@ -502,3 +502,29 @@ def test_await_result_defaults_are_named_constants():
     # The v1 poll defaults are exposed (not magic numbers) so callers can see them.
     assert DEFAULT_RESULT_TIMEOUT_S == 30.0
     assert DEFAULT_POLL_INTERVAL_S == 0.1
+
+
+# --- worker_policy (§14 #21) -------------------------------------------------
+
+
+async def test_worker_policy_is_none_when_no_worker_has_booted():
+    async with Store(":memory:") as store:
+        assert await make_client(store).worker_policy() is None
+
+
+async def test_worker_policy_reads_back_what_the_worker_published():
+    from llmbus.retry import RetryPolicy, WorkerPolicy
+
+    policy = WorkerPolicy(
+        retry=RetryPolicy(max_attempts=2, base_delay_s=0.5, max_delay_s=30.0),
+        job_timeout_s=30.0,
+        default_output_tokens=512,
+    )
+    async with Store(":memory:") as store:
+        await store.publish_worker_policy(policy)
+        published = await make_client(store).worker_policy()
+    assert published is not None
+    # The producer's whole reason for asking: size a wait against this bound
+    # instead of hardcoding a belief about the worker's .env.
+    assert published.worst_case_s == 60.5
+    assert published.max_attempts == 2

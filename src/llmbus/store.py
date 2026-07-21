@@ -31,6 +31,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from llmbus.retry import WorkerPolicy, worst_case_seconds
 from llmbus.schema import Job, Result, Usage
 
 # The store-only initial state; terminal statuses ("ok"/"error") mirror `Result`.
@@ -53,6 +54,21 @@ CREATE TABLE IF NOT EXISTS jobs (
     completed_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
+
+-- The worker's effective run policy, republished on every worker boot (§14 #21).
+-- A polling producer sizes its wait against what the worker can actually do, so
+-- it needs that number as a FACT rather than as a constant copied into its own
+-- config, where it goes stale silently and the failure mode is paying twice.
+-- Single row: `id` is pinned to 1, so a boot overwrites rather than accumulates.
+CREATE TABLE IF NOT EXISTS worker_policy (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    max_attempts  INTEGER NOT NULL,
+    job_timeout_s REAL    NOT NULL,
+    base_delay_s  REAL    NOT NULL,
+    max_delay_s   REAL    NOT NULL,
+    worst_case_s  REAL    NOT NULL,
+    updated_at    TEXT    NOT NULL
+);
 """
 
 
@@ -94,6 +110,25 @@ class ProjectDayCost:
     project: str
     day: str
     cost_usd: float
+
+
+@dataclass(frozen=True)
+class PublishedWorkerPolicy:
+    """What the running worker published about its own run policy (§14 #21).
+
+    `worst_case_s` is the number a polling producer actually needs: the ceiling
+    on how long one job can occupy the worker. The inputs are carried alongside
+    it so an operator reading the store can see *why* it is that value, and
+    `updated_at` shows which boot published it — a value from a worker that has
+    since been reconfigured is detectable rather than merely wrong.
+    """
+
+    max_attempts: int
+    job_timeout_s: float
+    base_delay_s: float
+    max_delay_s: float
+    worst_case_s: float
+    updated_at: datetime
 
 
 class Store:
@@ -238,6 +273,64 @@ class Store:
         )
         rows = await cursor.fetchall()
         return [ProjectDayCost(row["project"], row["day"], float(row["total"])) for row in rows]
+
+    async def publish_worker_policy(
+        self, policy: WorkerPolicy, updated_at: datetime | None = None
+    ) -> None:
+        """Record the running worker's policy so producers can read it (§14 #21).
+
+        Called once per worker boot. Upserts the single pinned row, so the store
+        always describes the worker that is running now, not the one that ran
+        first. `updated_at` is injectable to keep the write testable without
+        freezing the clock.
+        """
+        stamped = updated_at if updated_at is not None else datetime.now(timezone.utc)
+        await self._conn.execute(
+            """
+            INSERT INTO worker_policy
+                (id, max_attempts, job_timeout_s, base_delay_s, max_delay_s, worst_case_s,
+                 updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                max_attempts  = excluded.max_attempts,
+                job_timeout_s = excluded.job_timeout_s,
+                base_delay_s  = excluded.base_delay_s,
+                max_delay_s   = excluded.max_delay_s,
+                worst_case_s  = excluded.worst_case_s,
+                updated_at    = excluded.updated_at
+            """,
+            (
+                policy.retry.max_attempts,
+                policy.job_timeout_s,
+                policy.retry.base_delay_s,
+                policy.retry.max_delay_s,
+                worst_case_seconds(policy),
+                stamped.isoformat(),
+            ),
+        )
+        await self._conn.commit()
+
+    async def read_worker_policy(self) -> PublishedWorkerPolicy | None:
+        """The policy the worker published, or None if no worker has ever booted
+        against this store.
+
+        None is a real, expected state — a producer may legitimately submit
+        before the worker's first start (§5: topology creation is idempotent and
+        does not depend on worker order), so the caller decides whether an
+        unknown policy is a warning or a refusal.
+        """
+        cursor = await self._conn.execute("SELECT * FROM worker_policy WHERE id = 1")
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return PublishedWorkerPolicy(
+            max_attempts=int(row["max_attempts"]),
+            job_timeout_s=float(row["job_timeout_s"]),
+            base_delay_s=float(row["base_delay_s"]),
+            max_delay_s=float(row["max_delay_s"]),
+            worst_case_s=float(row["worst_case_s"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
 
 
 def _row_to_stored_job(row: aiosqlite.Row) -> StoredJob:

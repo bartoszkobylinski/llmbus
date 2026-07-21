@@ -249,6 +249,9 @@ async def run_worker(
     shutdown = shutdown if shutdown is not None else asyncio.Event()
     try:
         await store.connect()
+        # Publish before consuming: a producer that connects while this worker is
+        # still joining the group should still read a current policy (§14 #21).
+        await store.publish_worker_policy(policy)
         client = await connect_broker(
             lambda: IggyClient.from_connection_string(
                 iggy_connection_string(

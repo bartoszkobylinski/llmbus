@@ -288,6 +288,14 @@ Ustalenia potwierdzone na maszynie (2026-07-14, nadal aktualne):
   po której `cost.py` wycenia, §6), z `HAVING SUM(cost_usd) > 0`: grupy bez realnego wydatku
   (tylko `pending`/`error`, albo darmowe completiony) są **pominięte** — księga wydatków
   pokazuje realny koszt, nie wiersze `$0.00`. To „tabela w store per projekt/dzień" z góry tej sekcji.
+- **Polityka workera (impl., PR `worker-policy-publish`, §14 #21):** tabela `worker_policy`
+  (jeden wiersz, `id=1`, upsert przy każdym boocie workera **przed** rozpoczęciem konsumpcji)
+  niesie `max_attempts`/`job_timeout_s`/`base_delay_s`/`max_delay_s`, wyliczony
+  `worst_case_s` (`retry.worst_case_seconds`, czysta funkcja w bramce mutacyjnej) oraz
+  `updated_at`. Czyta się przez `BusClient.worker_policy()`. Dzięki temu producent, który
+  pollinguje wynik, **skaluje swój timeout wobec faktu**, a nie wobec liczby przepisanej do
+  własnego configu. Dla operatora to też odpowiedź na „z jaką polityką ten worker realnie
+  chodzi" bez wchodzenia w `.env` na boxie.
 
 ## 12. Braki Iggy SDK, które tu uderzysz (nie blokują v1)
 - **nagłówki wiadomości** — metadane w headerach zamiast body.
@@ -547,6 +555,34 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    (`content=`, nie `json=`), by podpis pokrywał dokładnie to, co idzie na drut. Odrzucone:
    (A) sam shared-secret w nagłówku (tożsamość bez integralności), (B) tylko-localhost bez
    auth (lokalny proces mógłby sfałszować werdykt hide).
+21. **Czym producent ma weryfikować budżet czasu (§8)?** **ROZSTRZYGNIĘTE (2026-07-21) —
+   worker PUBLIKUJE swoją efektywną politykę do współdzielonego store'a, producent ją czyta.**
+   §8 wymaga `concurrency × per_job_worst ≤ timeout < CLAIM_LEASE`, ale `per_job_worst` żył
+   jako stała w configu **konsumenta** (`llmbus_worker_worst_case_seconds = 61`) — czyli jako
+   *przekonanie* o `.env` cudzego procesu. Nic nie wykrywało, że przestało być prawdziwe, a
+   objawem nie jest błąd, tylko **cicha podwójna płatność** przy retry providera.
+   **Wdrożenie:** `Store.publish_worker_policy(policy)` przy każdym boocie workera, **przed**
+   rozpoczęciem konsumpcji (producent łączący się w trakcie dołączania workera do grupy i tak
+   czyta aktualny wiersz); tabela `worker_policy`, jeden wiersz przypięty `id=1`, upsert — więc
+   store opisuje workera, który chodzi **teraz**, nie tego, który wstał pierwszy.
+   `BusClient.worker_policy()` czyta. Ceiling liczy czysta `retry.worst_case_seconds`
+   (bramka mutacyjna), a nie komentarz.
+   **`None` jest stanem legalnym, nie błędem:** producent może wysłać zanim worker wystanie
+   pierwszy raz (§5 — tworzenie topologii jest idempotentne i nie zależy od kolejności). Bus
+   **nie rozstrzyga**, czy nieweryfikowalny budżet to ostrzeżenie czy odmowa — publikuje fakt,
+   decyzja należy do konsumenta (§1: bus nie zna domeny).
+   **Przy okazji wyszedł błąd w moich własnych liczbach:** wcześniejsze „~275 s" dla stock
+   workera jest **złe** — prawdziwy ceiling to **243,5 s** (backoffy 0,5+1+2 = **3,5**, nie
+   ~35; liczone ręcznie w komentarzu). Żadnej decyzji to nie zmienia (4 × 243,5 = 974 > 600
+   nadal nie mieści się pod leasem, a `61` po stronie hate-moda jest konserwatywne wobec
+   realnych 60,5) — ale to dokładnie klasa pomyłki, którą ta funkcja likwiduje.
+   **Odrzucone:** (B) skrypt asercji przy deployu — sprawdza **pliki** configu w momencie
+   deployu, nie działający proces; ręczna edycja `.env`, restart workera z innym ustawieniem
+   albo po prostu nieuruchomienie skryptu otwierają lukę z powrotem, równie cicho.
+   (C) per-job budżet w kontrakcie §4 — **właściwy docelowy lek** (usuwa sprzężenie zamiast je
+   monitorować i odblokowuje ograniczenie „`WORKER_*` jest globalny dla workera" z §8), ale to
+   zmiana kontraktu godzinę po pierwszym ruchu produkcyjnym. Zostaje jako następny krok, gdy
+   pojawi się drugi konsument o innym profilu latencji.
 20. **Dostawa werdyktu do pilota: callback czy poll?** **ROZSTRZYGNIĘTE (2026-07-21) — POLL
    (`await_result`), nie callback; potwierdzone przez usera.** Bus wspiera oba (§14 #7) i
    callback jest po stronie workera gotowy wraz z HMAC (§14 #19) — pilot go po prostu **nie

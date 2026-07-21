@@ -10,8 +10,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from llmbus.retry import RetryPolicy, WorkerPolicy
 from llmbus.schema import Job, Message, Result, Usage
-from llmbus.store import PENDING, ProjectDayCost, Store, StoredJob
+from llmbus.store import (
+    PENDING,
+    ProjectDayCost,
+    PublishedWorkerPolicy,
+    Store,
+    StoredJob,
+)
 
 # A fixed submitted_at so round-trips through the store assert an exact value.
 _SUBMITTED = datetime(2026, 7, 3, 12, 34, 56, tzinfo=timezone.utc)
@@ -562,3 +569,68 @@ async def test_cost_by_project_day_uses_literal_submitted_at_date_with_offset(tm
         )
 
         assert await store.cost_by_project_day() == [ProjectDayCost("a", "2026-07-03", 1.0)]
+
+
+# --- worker policy publication (§14 #21) -------------------------------------
+
+
+def _policy(max_attempts=2, job_timeout_s=30.0, base_delay_s=0.5, max_delay_s=30.0):
+    return WorkerPolicy(
+        retry=RetryPolicy(
+            max_attempts=max_attempts, base_delay_s=base_delay_s, max_delay_s=max_delay_s
+        ),
+        job_timeout_s=job_timeout_s,
+        default_output_tokens=512,
+    )
+
+
+async def test_worker_policy_is_none_before_any_worker_boots(tmp_path):
+    # A producer can legitimately connect first (§5: topology creation does not
+    # depend on worker order), so "no policy yet" is a state, not an error.
+    async with Store(_db(tmp_path)) as store:
+        assert await store.read_worker_policy() is None
+
+
+async def test_publish_then_read_round_trips_every_field(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        await store.publish_worker_policy(_policy(), updated_at=_SUBMITTED)
+        assert await store.read_worker_policy() == PublishedWorkerPolicy(
+            max_attempts=2,
+            job_timeout_s=30.0,
+            base_delay_s=0.5,
+            max_delay_s=30.0,
+            worst_case_s=60.5,
+            updated_at=_SUBMITTED,
+        )
+
+
+async def test_published_worst_case_is_derived_not_supplied(tmp_path):
+    # The store computes the bound from the policy, so a producer cannot be told
+    # a worst case that disagrees with the retry numbers beside it.
+    async with Store(_db(tmp_path)) as store:
+        await store.publish_worker_policy(_policy(max_attempts=4, job_timeout_s=60.0))
+        published = await store.read_worker_policy()
+        assert published is not None
+        assert published.worst_case_s == 243.5
+
+
+async def test_republishing_overwrites_rather_than_accumulating(tmp_path):
+    # Every worker boot republishes. The store must describe the worker running
+    # NOW — a stale row beside a fresh one would let a producer read either.
+    async with Store(_db(tmp_path)) as store:
+        await store.publish_worker_policy(_policy(max_attempts=4, job_timeout_s=60.0))
+        await store.publish_worker_policy(_policy(max_attempts=2, job_timeout_s=30.0))
+        published = await store.read_worker_policy()
+        assert published is not None
+        assert (published.max_attempts, published.worst_case_s) == (2, 60.5)
+        cursor = await store._conn.execute("SELECT COUNT(*) FROM worker_policy")
+        assert (await cursor.fetchone())[0] == 1
+
+
+async def test_publish_stamps_the_current_time_by_default(tmp_path):
+    before = datetime.now(timezone.utc)
+    async with Store(_db(tmp_path)) as store:
+        await store.publish_worker_policy(_policy())
+        published = await store.read_worker_policy()
+    assert published is not None
+    assert before <= published.updated_at <= datetime.now(timezone.utc)

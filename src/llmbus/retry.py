@@ -86,6 +86,32 @@ class WorkerPolicy:
         _validate_worker_policy(self.job_timeout_s, self.default_output_tokens)
 
 
+def worst_case_seconds(policy: WorkerPolicy) -> float:
+    """Upper bound on how long ONE job can occupy the worker (§8, §14 #21).
+
+    Every attempt can burn its full `job_timeout_s`, and each retry waits its
+    backoff first. Jitter only ever shortens a wait (`backoff_delay` scales the
+    capped delay by a draw in [0, 1)), so summing the **uncapped-by-jitter**
+    delays is a true ceiling, not an average.
+
+    This exists because a producer polling for a result must size its wait
+    against what the worker can actually do. Left as a number in the consumer's
+    config it is a *belief* about this process's `.env`, and a belief that goes
+    stale silently: too short and the producer abandons a job the worker later
+    completes into the store unread, so the retry pays for a fresh `job_id`
+    (§14 #21). Publishing it (`store.publish_worker_policy`) makes it a fact the
+    consumer can read back.
+
+    Pure, so the arithmetic sits in the mutation gate rather than behind a live
+    worker.
+    """
+    backoff_total: float = sum(
+        min(policy.retry.base_delay_s * 2**i, policy.retry.max_delay_s)
+        for i in range(policy.retry.max_attempts - 1)
+    )
+    return policy.retry.max_attempts * policy.job_timeout_s + backoff_total
+
+
 def is_retryable(exc: BaseException) -> bool:
     """True if `exc` is a transient failure worth retrying (§6).
 

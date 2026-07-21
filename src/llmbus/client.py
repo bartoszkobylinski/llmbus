@@ -34,7 +34,7 @@ from apache_iggy import IggyClient, SendMessage
 from llmbus.config import Config, iggy_connection_string, load_config
 from llmbus.providers.base import provider_for
 from llmbus.schema import Job, Result
-from llmbus.store import Store, StoredJob
+from llmbus.store import PublishedWorkerPolicy, Store, StoredJob
 from llmbus.worker import DEFAULT_TOPOLOGY, Topology, ensure_topology
 
 _log = logging.getLogger("llmbus.client")
@@ -247,3 +247,20 @@ class BusClient:
         return await poll_result(
             self._store, job_id, timeout_s=timeout_s, poll_interval_s=poll_interval_s
         )
+
+    async def worker_policy(self) -> PublishedWorkerPolicy | None:
+        """What the running worker published about its run policy (§14 #21).
+
+        A polling producer must size `await_result`'s timeout against what the
+        worker can actually do — and, because v1 consumes serially (§5, one
+        partition), against that times however many jobs it can have in flight at
+        once. Hardcoding that number in the consumer makes it a belief about this
+        worker's `.env`; reading it here makes it a fact.
+
+        `None` means no worker has ever booted against this store. That is a real
+        state, not an error — a producer may submit before the worker's first
+        start — so the caller decides whether an unverifiable budget is a warning
+        or a refusal. The bus does not decide that: it publishes the fact and
+        stays out of the consumer's policy (§1).
+        """
+        return await self._store.read_worker_policy()
