@@ -264,7 +264,19 @@ skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowie
    **ROZSTRZYGNIĘTE (2026-07-18) — zostaje `gpt-5.4-mini`.** To już świadomy wybór prod
    hate-moda (`config.py:23-29`): `-nano` przepalał false-positive na polskich niuansach,
    a stawki kosztu są przypięte do tego modelu. #6 to więc potwierdzenie istniejącej
-   wartości, nie zmiana kodu. Uwaga: live-test structured output (§14 #10) szedł na
+   wartości, nie zmiana kodu. **KOREKTA (2026-07-20): to zdanie było BŁĘDNE.** Sprawdzono
+   wyłącznie, że hate-mod ma ten model w swoim configu — NIE sprawdzono, czy llmbus go w
+   ogóle **routuje i wycenia**. Nie robił ani jednego, ani drugiego: `gpt-5.4-mini` nie
+   istniał w `providers/base.py::PROVIDERS` ani w `cost.py::PRICING`, więc **każdy** job
+   `classify` padłby na `UnknownModelError` → `result_error` — integracja wyglądałaby na
+   żywą, a nie przetworzyłaby ani jednego komentarza. Model dodany w PR
+   `feat/model-registry-fail-loud` (0.75/4.50 per M; zweryfikowane 2026-07-20 wobec
+   cennika OpenAI i niezależnie zgodne z `config.py:30-31` hate-moda; dowody:
+   `notes/model-pricing-openai.md`). W tym samym PR `BusClient.submit` waliduje model
+   **przed** zapisem `pending` i wysyłką na Iggy — nieznany model pada teraz w miejscu
+   wywołania, a nie jako błędny `Result` rundę później. Lekcja: „model jest w configu
+   konsumenta" nie znaczy „bus go obsłuży" — to dwie osobne tabele i rozjazd wychodzi
+   dopiero w runtime. Uwaga: live-test structured output (§14 #10) szedł na
    `gpt-5-nano`; `-mini` to ta sama rodzina/API, mapowanie `json_schema`+`strict`
    identyczne, ale nie zweryfikowane live osobno dla `-mini`.
 7. ~~Sync (poll `await_result`) vs async (callback) — czy oba wspieramy w v1, czy tylko callback?~~

@@ -19,6 +19,7 @@ _EXPECTED_ROUTES = {
     "gpt-5": "openai",
     "gpt-5-mini": "openai",
     "gpt-5-nano": "openai",
+    "gpt-5.4-mini": "openai",
     "claude-opus-4-8": "anthropic",
     "claude-sonnet-5": "anthropic",
     "claude-haiku-4-5": "anthropic",

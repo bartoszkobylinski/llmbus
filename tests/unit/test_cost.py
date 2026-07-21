@@ -24,6 +24,9 @@ _DOCUMENTED_PRICING = MappingProxyType(
         "gpt-5-nano": (
             PricePoint(date(2025, 1, 1), ModelPricing(Decimal("0.05"), Decimal("0.40"))),
         ),
+        "gpt-5.4-mini": (
+            PricePoint(date(2025, 1, 1), ModelPricing(Decimal("0.75"), Decimal("4.50"))),
+        ),
         "claude-opus-4-8": (
             PricePoint(date(2025, 1, 1), ModelPricing(Decimal("5.00"), Decimal("25.00"))),
         ),

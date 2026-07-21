@@ -30,6 +30,8 @@ PROVIDERS: dict[str, str] = {
     "gpt-5": "openai",
     "gpt-5-mini": "openai",
     "gpt-5-nano": "openai",
+    # The hate-moderator pilot's classifier model (§14 #6).
+    "gpt-5.4-mini": "openai",
     # Anthropic
     "claude-opus-4-8": "anthropic",
     "claude-sonnet-5": "anthropic",

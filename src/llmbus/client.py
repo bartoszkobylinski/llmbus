@@ -32,6 +32,7 @@ from collections.abc import Mapping
 from apache_iggy import IggyClient, SendMessage
 
 from llmbus.config import Config, iggy_connection_string, load_config
+from llmbus.providers.base import provider_for
 from llmbus.schema import Job, Result
 from llmbus.store import Store, StoredJob
 from llmbus.worker import DEFAULT_TOPOLOGY, Topology, ensure_topology
@@ -212,7 +213,17 @@ class BusClient:
         (first write wins, §6) but is still sent; the worker's one-shot `finalize`
         makes redelivery safe. Returns immediately — the model call happens later on a
         worker (§3).
+
+        A model no provider serves raises `UnknownModelError` **here**, before the
+        store row or the Iggy send. Without this the job is accepted, and the worker
+        turns it into an error `Result` a round trip later — so a producer pinned to a
+        model the bus does not route looks healthy while silently failing every job
+        (exactly the `gpt-5.4-mini` case, §14 #6). Failing at the call site makes that
+        a startup-visible bug instead of a queue full of errors. Producer and worker
+        resolve the *same* routing table from the same install (§14 #3), so this can
+        never reject a model the worker would have served.
         """
+        provider_for(job.model)
         await self._store.insert_pending(job)
         await send_job(self._iggy, job, self._topology)
         _log.debug(

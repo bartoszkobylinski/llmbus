@@ -57,6 +57,11 @@ PRICING: dict[str, tuple[PricePoint, ...]] = {
     "gpt-5": (PricePoint(_EPOCH, ModelPricing(Decimal("1.25"), Decimal("10.00"))),),
     "gpt-5-mini": (PricePoint(_EPOCH, ModelPricing(Decimal("0.25"), Decimal("2.00"))),),
     "gpt-5-nano": (PricePoint(_EPOCH, ModelPricing(Decimal("0.05"), Decimal("0.40"))),),
+    # hate-moderator's classifier model (§14 #6). Rate verified 2026-07-20 against
+    # OpenAI's published pricing, and independently equal to the rates hate-mod
+    # pins in its own config (`config.py:30-31`) — two sources agreeing, not one
+    # copied twice. Evidence: `notes/model-pricing-openai.md`.
+    "gpt-5.4-mini": (PricePoint(_EPOCH, ModelPricing(Decimal("0.75"), Decimal("4.50"))),),
     # Anthropic
     "claude-opus-4-8": (PricePoint(_EPOCH, ModelPricing(Decimal("5.00"), Decimal("25.00"))),),
     "claude-haiku-4-5": (PricePoint(_EPOCH, ModelPricing(Decimal("1.00"), Decimal("5.00"))),),
