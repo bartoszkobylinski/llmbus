@@ -146,11 +146,24 @@ Interfejs `call(model, messages, params) -> {completion, usage}`; implementacje 
   Iggy; nie kupujemy odczepienia latencji. To był świadomy wybór (§14 #20): odczepienie latencji
   kosztowałoby przebudowę prodowej ścieżki moderacji i otwierało dziurę cichego gubienia
   komentarzy.
-- **Budżet czasu:** `BUS_TIMEOUT_S` **musi** być mniejszy niż `CLAIM_LEASE` hate-moda
-  (`poller.py:582`, dziś 5 min), inaczej cron przejmie wiersz, którego job jeszcze leci, i
-  zapłacimy za `classify` dwa razy + zrobimy drugi `hide` — dokładnie regresja, którą zamknął
-  ich commit `376699b`. To sprzężenie configu **między repozytoriami** — zmiana jednej strony
-  bez drugiej jest cicha i płatna.
+- **Budżet czasu — sprzężenie configu MIĘDZY REPOZYTORIAMI, dwustronne.** Czas czekania
+  hate-moda (`settings.llmbus_timeout_seconds`) jest ściśnięty z dwóch stron i **żadna** wartość
+  nie spełniała obu przy pierwotnym leasie:
+  **(góra)** musi być **mniejszy** niż `CLAIM_LEASE` hate-moda — inaczej cron przejmie wiersz,
+  którego job jeszcze leci, i zapłacimy za `classify` dwa razy + zrobimy drugi `hide`
+  (regresja zamknięta ich commitem `376699b`);
+  **(dół)** musi być **większy** niż najgorszy przypadek workera — inaczej porzucamy job, który
+  worker wciąż ponawia; ten kończy się potem sukcesem do store'a, którego już nikt nie czyta, a
+  ponowienie wysyła **nowy `job_id`** i płaci drugi raz.
+  Stock worker (`WORKER_MAX_ATTEMPTS=4` × `WORKER_JOB_TIMEOUT_S=60` + backoff, §14 #11) daje
+  najgorszy przypadek **~275 s**, a lease wynosił 300 s → margines 25 s, czyli praktycznie brak.
+  **Rozstrzygnięte (2026-07-21, user): podnosimy `CLAIM_LEASE` hate-moda 5 → 10 min**
+  (`llmbus_timeout_seconds = 280`). Rozważane i odrzucone: skrócenie budżetu retry workera
+  (`WORKER_*` jest **globalny dla workera**, nie per-job — strojenie pod pilota obcięłoby
+  odporność każdemu przyszłemu konsumentowi) oraz per-job budżet w kontrakcie §4 (zmiana
+  kontraktu, blokuje pilota na pracy w busie; do rozważenia gdy pojawi się drugi konsument o
+  innym profilu latencji). Cena wybranego wariantu: zaorany worker hate-moda blokuje wiersz o
+  jeden cykl crona dłużej.
 
 ## 9. Struktura repo (propozycja)
 ```
