@@ -3,6 +3,7 @@
 import json
 import uuid
 from datetime import datetime, timedelta, timezone, tzinfo
+from math import inf, nextafter
 
 import pytest
 from pydantic import ValidationError
@@ -756,8 +757,9 @@ def test_a_non_positive_ttl_is_rejected(ttl_s):
 
 def test_the_maximum_ttl_is_accepted_and_a_hair_over_is_not():
     assert Job(**_job_kwargs(ttl_s=MAX_TTL_S)).ttl_s == MAX_TTL_S
+    assert Job(**_job_kwargs(ttl_s=nextafter(MAX_TTL_S, 0.0))).ttl_s < MAX_TTL_S
     with pytest.raises(ValidationError):
-        Job(**_job_kwargs(ttl_s=MAX_TTL_S + 1))
+        Job(**_job_kwargs(ttl_s=nextafter(MAX_TTL_S, inf)))
 
 
 def test_no_ttl_means_no_deadline():

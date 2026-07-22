@@ -724,3 +724,38 @@ async def test_the_jobs_table_is_never_rebuilt(tmp_path):
         await store.insert_pending(job)
     async with Store(path) as store:
         assert await store.get(job.job_id) is not None
+
+
+async def test_rebuilding_a_stale_policy_table_preserves_existing_jobs(tmp_path):
+    """Exercise the destructive migration while real job data is present."""
+    import aiosqlite
+
+    path = _db(tmp_path)
+    job = _job()
+    async with Store(path) as store:
+        await store.insert_pending(job)
+
+    async with aiosqlite.connect(path) as raw:
+        await raw.execute("DROP TABLE worker_policy")
+        await raw.execute(
+            """
+            CREATE TABLE worker_policy (
+                id            INTEGER PRIMARY KEY CHECK (id = 1),
+                max_attempts  INTEGER NOT NULL,
+                job_timeout_s REAL    NOT NULL,
+                base_delay_s  REAL    NOT NULL,
+                max_delay_s   REAL    NOT NULL,
+                worst_case_s  REAL    NOT NULL,
+                updated_at    TEXT    NOT NULL
+            )
+            """
+        )
+        await raw.commit()
+
+    async with Store(path) as store:
+        await store.publish_worker_policy(_policy())
+        stored = await store.get(job.job_id)
+
+    assert stored is not None
+    assert stored.job_id == job.job_id
+    assert stored.status == "pending"
