@@ -13,6 +13,7 @@ import pytest
 from llmbus.retry import RetryPolicy, WorkerPolicy
 from llmbus.schema import Job, Message, Result, Usage
 from llmbus.store import (
+    _WORKER_POLICY_COLUMNS,
     PENDING,
     ProjectDayCost,
     PublishedWorkerPolicy,
@@ -673,7 +674,7 @@ async def test_publish_stamps_the_current_time_by_default(tmp_path):
     assert before <= published.updated_at <= datetime.now(timezone.utc)
 
 
-async def test_a_stale_worker_policy_shape_is_rebuilt_on_connect(tmp_path):
+async def test_a_stale_worker_policy_shape_is_rebuilt_on_publish(tmp_path):
     """CREATE TABLE IF NOT EXISTS is a NO-OP against a table with a different
     shape, so a renamed column would leave the old schema in place and every
     publish would fail with "no column named …" — taking the worker down before
@@ -759,3 +760,55 @@ async def test_rebuilding_a_stale_policy_table_preserves_existing_jobs(tmp_path)
     assert stored is not None
     assert stored.job_id == job.job_id
     assert stored.status == "pending"
+
+
+async def test_a_reader_tolerates_a_stale_policy_table_instead_of_repairing_it(tmp_path):
+    """Only the worker repairs the shape. A producer that opened the store first
+    must not drop a table the worker may have just published to — it reports
+    "nothing published", which every caller already handles."""
+    import aiosqlite
+
+    path = _db(tmp_path)
+    async with aiosqlite.connect(path) as raw:
+        await raw.execute(
+            """
+            CREATE TABLE worker_policy (
+                id            INTEGER PRIMARY KEY CHECK (id = 1),
+                max_attempts  INTEGER NOT NULL,
+                job_timeout_s REAL    NOT NULL,
+                base_delay_s  REAL    NOT NULL,
+                max_delay_s   REAL    NOT NULL,
+                worst_case_s  REAL    NOT NULL,
+                updated_at    TEXT    NOT NULL
+            )
+            """
+        )
+        await raw.execute(
+            "INSERT INTO worker_policy VALUES (1, 4, 60.0, 0.5, 30.0, 243.5, '2026-01-01T00:00:00+00:00')"
+        )
+        await raw.commit()
+
+    async with Store(path) as reader:
+        assert await reader.read_worker_policy() is None
+        # And the stale table is still there — the reader repaired nothing.
+        cursor = await reader._conn.execute("PRAGMA table_info(worker_policy)")
+        assert {row[1] for row in await cursor.fetchall()} != _WORKER_POLICY_COLUMNS
+
+
+async def test_concurrent_publishes_do_not_collide(tmp_path):
+    """Several connections publishing at once must not race on the shape check.
+    PRAGMA-then-DROP without a write lock produced "database is locked"."""
+    path = _db(tmp_path)
+    stores = [Store(path) for _ in range(4)]
+    for store in stores:
+        await store.connect()
+    try:
+        await asyncio.gather(*(s.publish_worker_policy(_policy()) for s in stores))
+        published = await stores[0].read_worker_policy()
+        assert published is not None
+        assert published.retry_budget_s == 60.5
+        cursor = await stores[0]._conn.execute("SELECT COUNT(*) FROM worker_policy")
+        assert (await cursor.fetchone())[0] == 1
+    finally:
+        for store in stores:
+            await store.close()

@@ -102,6 +102,16 @@ Kroki:
   **skończone i ≤ `MAX_TTL_S` (86 400 s)**: `inf` przechodziło naiwne `> 0`, serializowało się
   do JSON-owego `null` i **po cichu wyłączało wygasanie** (deadline wyglądał na ustawiony i nie
   robił nic), a wielkie skończone wartości wywracały `timedelta` na `OverflowError`.
+  **Współlokacja NIE wystarcza — precondition jest szerszy (review 2026-07-22).** Producent
+  odmierza swoje czekanie zegarem **monotonicznym** (`await_result` → `time.monotonic`), a
+  wygasanie liczy się zegarem **ściennym** (`submitted_at` + `ttl_s` wobec `datetime.now`).
+  To są dwa różne zegary **na tym samym hoście**, więc **skok zegara ściennego** w trakcie
+  życia joba (korekta NTP, ręczne przestawienie, zmiana czasu) rozjeżdża je nawet bez drugiego
+  hosta: skok do przodu wygasza joby wcześniej, niż producent przestał czekać, skok do tyłu
+  przedłuża okno, w którym worker może jeszcze zapłacić za pracę już porzuconą. Pełny warunek
+  brzmi więc: **jeden host ORAZ brak skoków zegara ściennego w trakcie życia joba** (NTP w
+  trybie `slew`, nie `step`). Deadline absolutny tego **nie** naprawia — przesunąłby tylko
+  miejsce, w którym skok boli.
 
 **Uwaga o nagłówkach Iggy:** metadane (`project`, `model`, `priority`) logicznie należą do **nagłówków wiadomości**, ale Python SDK ich nie ma → w v1 wszystko idzie w body JSON. To jest dokładnie miejsce na ewentualną rozbudowę SDK (nagłówki).
 

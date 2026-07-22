@@ -94,22 +94,31 @@ _WORKER_POLICY_COLUMNS = frozenset(
 )
 
 
-async def _drop_stale_worker_policy(db: aiosqlite.Connection) -> None:
-    """Drop `worker_policy` if its shape is stale, so the DDL can recreate it.
+async def _rebuild_worker_policy_if_stale(db: aiosqlite.Connection) -> None:
+    """Drop and recreate `worker_policy` if its shape is stale.
 
-    Runs BEFORE the schema script: dropping first means the ordinary
-    `CREATE TABLE IF NOT EXISTS` rebuilds it, and no branch here is dead.
+    Called only from `publish_worker_policy`, i.e. only by the worker, and only
+    inside that method's `BEGIN IMMEDIATE` transaction. Both parts matter:
 
-    Dropping is safe **for this table specifically** and for no other: it holds
-    derived state that the worker republishes on every boot, so nothing is lost
-    that will not be rewritten. The `jobs` table is real data and is never
-    touched here. Worst case a producer reads no policy until the next worker
-    boot, which is already a handled state (advisory check, warns).
+    - **Writer-only.** Every process calls `connect()`, so doing this there let
+      any producer drop a table the worker had just published to. Producers only
+      ever read this table, and `read_worker_policy` tolerates a stale shape by
+      reporting "nothing published" — so they need no repair path at all.
+    - **Inside one write transaction.** `PRAGMA table_info` followed by an
+      unguarded `DROP` is check-then-act across connections: concurrent openers
+      could each see the old shape and race to drop and recreate, which in
+      practice surfaced as "database is locked". `BEGIN IMMEDIATE` takes the
+      write lock up front, so the inspection and the repair are one step and
+      other writers wait on `busy_timeout` instead of colliding.
+
+    Dropping is safe for this table and no other: it holds derived state the
+    worker republishes on every boot. `jobs` is real data and is never touched.
     """
     cursor = await db.execute("PRAGMA table_info(worker_policy)")
     rows = await cursor.fetchall()
     if rows and {row[1] for row in rows} != _WORKER_POLICY_COLUMNS:
         await db.execute("DROP TABLE worker_policy")
+        await db.execute(_WORKER_POLICY_SCHEMA)
 
 
 @dataclass(frozen=True)
@@ -199,7 +208,6 @@ class Store:
         # a transient lock waits on the connection's thread, not the event loop.
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=5000")
-        await _drop_stale_worker_policy(db)
         await db.executescript(_SCHEMA)
         await db.commit()
         self._db = db
@@ -329,6 +337,11 @@ class Store:
         freezing the clock.
         """
         stamped = updated_at if updated_at is not None else datetime.now(timezone.utc)
+        # BEGIN IMMEDIATE takes the write lock before the shape inspection, so
+        # repair-then-write is one atomic step. Without it, check-then-act races
+        # another opener and shows up as "database is locked".
+        await self._conn.execute("BEGIN IMMEDIATE")
+        await _rebuild_worker_policy_if_stale(self._conn)
         await self._conn.execute(
             """
             INSERT INTO worker_policy
@@ -366,6 +379,11 @@ class Store:
         cursor = await self._conn.execute("SELECT * FROM worker_policy WHERE id = 1")
         row = await cursor.fetchone()
         if row is None:
+            return None
+        if set(row.keys()) != _WORKER_POLICY_COLUMNS:
+            # A stale-shaped table left by an older worker. Readers do not repair
+            # it — only the worker does, on its next boot — so report it as
+            # "nothing published", which callers already handle.
             return None
         return PublishedWorkerPolicy(
             max_attempts=int(row["max_attempts"]),
