@@ -26,6 +26,27 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Ceiling on `ttl_s`. Two jobs at once here: it rejects `inf` (which would
+# serialise to JSON `null` and SILENTLY disable expiry — the deadline appears
+# set and does nothing) and it keeps the value inside what `timedelta` can hold,
+# since a huge finite TTL raises OverflowError at the comparison instead. A day
+# is far beyond any real producer's patience, so nothing legitimate is lost.
+MAX_TTL_S = 86_400.0
+
+
+def _ensure_aware(value: datetime) -> datetime:
+    """Reject a naive timestamp on the contract boundary.
+
+    The worker compares `submitted_at` against its own aware clock to decide
+    expiry (§14 #22). A naive value raises TypeError there — deep inside the job
+    path, after the job is queued — so it is refused here, at submit, where the
+    producer can still see it.
+    """
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        raise ValueError("submitted_at must be timezone-aware")
+    return value
+
+
 def _ensure_uuid(value: str) -> str:
     """Canonicalize to a lowercase-hyphenated UUID string; reject non-UUIDs.
 
@@ -129,7 +150,9 @@ class Job(BaseModel):
     params: JobParams = Field(default_factory=JobParams)
     callback_url: str | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
-    submitted_at: datetime = Field(default_factory=_utcnow)
+    submitted_at: Annotated[datetime, AfterValidator(_ensure_aware)] = Field(
+        default_factory=_utcnow
+    )
     # How long this job stays worth doing, in seconds after `submitted_at`
     # (§14 #22). The worker refuses an expired job instead of calling the
     # provider, so work the producer has already given up on is never paid for.
@@ -143,7 +166,7 @@ class Job(BaseModel):
     # later, and the wrong one for a producer polling with its own timeout —
     # that producer should set this to its own wait, so the two give up together
     # (§8).
-    ttl_s: float | None = Field(default=None, gt=0)
+    ttl_s: float | None = Field(default=None, gt=0, le=MAX_TTL_S)
 
 
 class Usage(BaseModel):

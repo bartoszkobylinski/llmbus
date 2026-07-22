@@ -37,7 +37,7 @@ from llmbus.schema import Job, Result, Usage
 # The store-only initial state; terminal statuses ("ok"/"error") mirror `Result`.
 PENDING = "pending"
 
-_SCHEMA = """
+_JOBS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     job_id        TEXT PRIMARY KEY,
     project       TEXT NOT NULL,
@@ -54,13 +54,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     completed_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
+"""
 
--- The worker's effective run policy, republished on every worker boot (§14 #21).
--- Operator visibility into what the running worker is configured with, plus a
--- necessary-but-not-sufficient signal for a polling producer's wait.
--- `retry_budget_s` EXCLUDES the rate-limiter wait (no static ceiling), so it is
--- not a guarantee — cost safety is `Job.ttl_s` (§14 #22).
--- Single row: `id` is pinned to 1, so a boot overwrites rather than accumulates.
+# The worker's effective run policy, republished on every worker boot (§14 #21).
+# Operator visibility into what the running worker is configured with, plus a
+# necessary-but-not-sufficient signal for a polling producer's wait.
+# `retry_budget_s` EXCLUDES the rate-limiter wait (no static ceiling), so it is
+# not a guarantee — cost safety is `Job.ttl_s` (§14 #22).
+# Single row: `id` is pinned to 1, so a boot overwrites rather than accumulates.
+_WORKER_POLICY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS worker_policy (
     id             INTEGER PRIMARY KEY CHECK (id = 1),
     max_attempts   INTEGER NOT NULL,
@@ -71,6 +73,43 @@ CREATE TABLE IF NOT EXISTS worker_policy (
     updated_at     TEXT    NOT NULL
 );
 """
+
+_SCHEMA = _JOBS_SCHEMA + _WORKER_POLICY_SCHEMA
+
+# Columns `worker_policy` is expected to have. `CREATE TABLE IF NOT EXISTS` is a
+# no-op against an existing table with a DIFFERENT shape, so a renamed column
+# would leave the old schema in place and every publish would fail with
+# "table worker_policy has no column named …" — taking the worker down before it
+# consumes anything. Checked and repaired on connect instead.
+_WORKER_POLICY_COLUMNS = frozenset(
+    {
+        "id",
+        "max_attempts",
+        "job_timeout_s",
+        "base_delay_s",
+        "max_delay_s",
+        "retry_budget_s",
+        "updated_at",
+    }
+)
+
+
+async def _drop_stale_worker_policy(db: aiosqlite.Connection) -> None:
+    """Drop `worker_policy` if its shape is stale, so the DDL can recreate it.
+
+    Runs BEFORE the schema script: dropping first means the ordinary
+    `CREATE TABLE IF NOT EXISTS` rebuilds it, and no branch here is dead.
+
+    Dropping is safe **for this table specifically** and for no other: it holds
+    derived state that the worker republishes on every boot, so nothing is lost
+    that will not be rewritten. The `jobs` table is real data and is never
+    touched here. Worst case a producer reads no policy until the next worker
+    boot, which is already a handled state (advisory check, warns).
+    """
+    cursor = await db.execute("PRAGMA table_info(worker_policy)")
+    rows = await cursor.fetchall()
+    if rows and {row[1] for row in rows} != _WORKER_POLICY_COLUMNS:
+        await db.execute("DROP TABLE worker_policy")
 
 
 @dataclass(frozen=True)
@@ -160,6 +199,7 @@ class Store:
         # a transient lock waits on the connection's thread, not the event loop.
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=5000")
+        await _drop_stale_worker_policy(db)
         await db.executescript(_SCHEMA)
         await db.commit()
         self._db = db

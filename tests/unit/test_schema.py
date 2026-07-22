@@ -2,12 +2,20 @@
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 
 import pytest
 from pydantic import ValidationError
 
-from llmbus.schema import Job, JobParams, Message, ResponseFormat, Result, Usage
+from llmbus.schema import (
+    MAX_TTL_S,
+    Job,
+    JobParams,
+    Message,
+    ResponseFormat,
+    Result,
+    Usage,
+)
 
 # Valid UUIDs for Result tests — job_id must parse as a UUID under the contract.
 _JOB_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
@@ -649,3 +657,108 @@ def test_job_round_trips_response_format_through_wire_json():
     assert wire["params"]["response_format"]["schema"] == _VERDICT_SCHEMA
     assert "json_schema" not in wire["params"]["response_format"]
     assert Job.model_validate_json(job.model_dump_json(by_alias=True)) == job
+
+
+# --- deadline validation (§14 #22) -------------------------------------------
+
+
+def _job_kwargs(**overrides):
+    data = {
+        "project": "hate-moderator",
+        "kind": "classify",
+        "model": "gpt-5-nano",
+        "messages": [Message(role="user", content="hi")],
+    }
+    data.update(overrides)
+    return data
+
+
+def test_a_naive_submitted_at_is_rejected_at_the_contract_boundary():
+    """The worker compares this against its own aware clock; a naive value would
+    raise TypeError deep in the job path, after the job was already queued."""
+    # Anchored on the full message: a substring match would still pass if the
+    # text were mangled, and this string is what tells the producer what to fix.
+    with pytest.raises(ValidationError, match=r"Value error, submitted_at must be timezone-aware"):
+        Job(**_job_kwargs(submitted_at=datetime(2026, 1, 1)))
+
+
+class _OffsetOnlyForRealDatetimes(tzinfo):
+    """Aware, but only answers when asked about an actual datetime.
+
+    `tzinfo.utcoffset` takes the datetime as its argument, and a real
+    implementation may need it (DST rules do). Asking with None instead would
+    call such a zone "naive" and reject a perfectly valid timestamp.
+    """
+
+    def utcoffset(self, dt):
+        return None if dt is None else timedelta(hours=2)
+
+    def tzname(self, dt):
+        return "REAL-ONLY"
+
+    def dst(self, dt):
+        return timedelta(0)
+
+
+class _NeverHasAnOffset(tzinfo):
+    """Carries a tzinfo but yields no offset — aware in name only."""
+
+    def utcoffset(self, dt):
+        return None
+
+    def tzname(self, dt):
+        return "PSEUDO"
+
+    def dst(self, dt):
+        return None
+
+
+def test_a_zone_that_needs_the_datetime_is_still_accepted():
+    stamped = datetime(2026, 1, 1, tzinfo=_OffsetOnlyForRealDatetimes())
+    assert Job(**_job_kwargs(submitted_at=stamped)).submitted_at == stamped
+
+
+def test_a_tzinfo_that_yields_no_offset_is_rejected():
+    """`tzinfo is not None` alone is not awareness — this is why the check asks
+    for the offset rather than just the attribute."""
+    with pytest.raises(ValidationError, match=r"Value error, submitted_at must be timezone-aware"):
+        Job(**_job_kwargs(submitted_at=datetime(2026, 1, 1, tzinfo=_NeverHasAnOffset())))
+
+
+def test_an_aware_submitted_at_is_accepted():
+    stamped = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert Job(**_job_kwargs(submitted_at=stamped)).submitted_at == stamped
+
+
+def test_an_infinite_ttl_is_rejected():
+    """The nastiest of the invalid values: inf passes a naive `> 0` check and
+    serialises to JSON null, so the deadline LOOKS set and silently does nothing."""
+    with pytest.raises(ValidationError):
+        Job(**_job_kwargs(ttl_s=float("inf")))
+
+
+def test_a_nan_ttl_is_rejected():
+    with pytest.raises(ValidationError):
+        Job(**_job_kwargs(ttl_s=float("nan")))
+
+
+def test_a_ttl_beyond_timedeltas_range_is_rejected():
+    """A huge finite TTL would raise OverflowError at the expiry comparison."""
+    with pytest.raises(ValidationError):
+        Job(**_job_kwargs(ttl_s=1e30))
+
+
+@pytest.mark.parametrize("ttl_s", [0, -1])
+def test_a_non_positive_ttl_is_rejected(ttl_s):
+    with pytest.raises(ValidationError):
+        Job(**_job_kwargs(ttl_s=ttl_s))
+
+
+def test_the_maximum_ttl_is_accepted_and_a_hair_over_is_not():
+    assert Job(**_job_kwargs(ttl_s=MAX_TTL_S)).ttl_s == MAX_TTL_S
+    with pytest.raises(ValidationError):
+        Job(**_job_kwargs(ttl_s=MAX_TTL_S + 1))
+
+
+def test_no_ttl_means_no_deadline():
+    assert Job(**_job_kwargs()).ttl_s is None

@@ -671,3 +671,56 @@ async def test_publish_stamps_the_current_time_by_default(tmp_path):
         published = await store.read_worker_policy()
     assert published is not None
     assert before <= published.updated_at <= datetime.now(timezone.utc)
+
+
+async def test_a_stale_worker_policy_shape_is_rebuilt_on_connect(tmp_path):
+    """CREATE TABLE IF NOT EXISTS is a NO-OP against a table with a different
+    shape, so a renamed column would leave the old schema in place and every
+    publish would fail with "no column named …" — taking the worker down before
+    it consumed anything. Simulates the pre-rename table."""
+    import aiosqlite
+
+    path = _db(tmp_path)
+    async with aiosqlite.connect(path) as raw:
+        await raw.execute(
+            """
+            CREATE TABLE worker_policy (
+                id            INTEGER PRIMARY KEY CHECK (id = 1),
+                max_attempts  INTEGER NOT NULL,
+                job_timeout_s REAL    NOT NULL,
+                base_delay_s  REAL    NOT NULL,
+                max_delay_s   REAL    NOT NULL,
+                worst_case_s  REAL    NOT NULL,
+                updated_at    TEXT    NOT NULL
+            )
+            """
+        )
+        await raw.commit()
+
+    async with Store(path) as store:
+        # Would raise OperationalError without the migration.
+        await store.publish_worker_policy(_policy())
+        published = await store.read_worker_policy()
+    assert published is not None
+    assert published.retry_budget_s == 60.5
+
+
+async def test_a_current_worker_policy_table_is_left_alone(tmp_path):
+    """The migration must not drop a healthy table and lose the live policy."""
+    path = _db(tmp_path)
+    async with Store(path) as store:
+        await store.publish_worker_policy(_policy(), updated_at=_SUBMITTED)
+    async with Store(path) as store:  # reconnect runs the migration again
+        published = await store.read_worker_policy()
+    assert published is not None
+    assert published.updated_at == _SUBMITTED
+
+
+async def test_the_jobs_table_is_never_rebuilt(tmp_path):
+    """The migration drops only derived state. Real job rows must survive."""
+    path = _db(tmp_path)
+    job = _job()
+    async with Store(path) as store:
+        await store.insert_pending(job)
+    async with Store(path) as store:
+        assert await store.get(job.job_id) is not None

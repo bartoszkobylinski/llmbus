@@ -88,6 +88,20 @@ Kroki:
 - **`max_tokens` > 0** jeśli podane (nieprawidłowe u każdego providera). **`temperature` jest opcjonalne** (`null`/nieustawione = model używa swojej domyślnej) i nieograniczone w kontrakcie — obsługa i zakresy różnią się per model, więc waliduje je adapter providera (§7). Rodzina GPT-5 **odrzuca jakiekolwiek ustawione `temperature`** (§14 #9): adapter OpenAI zgłasza wtedy błąd **przed** wywołaniem API, zamiast cicho je gubić.
 - **`response_format` (structured output) — wyłącznie wariant `json_schema`** (§14 #10, ponownie otwarte i rozstrzygnięte 2026-07-17): `{"type": "json_schema", "name": str, "schema": {…}}` albo `null` (wolny tekst). Ten jeden kształt mapuje się natywnie na obu providerów (OpenAI `response_format` json_schema + `strict: true`; Anthropic `output_config.format`); luźny `json_object` to koncept tylko-OpenAI i celowo NIE wchodzi. Walidacja wczesna (fail-loud): `schema` musi być niepustym schematem obiektu z top-level `additionalProperties: false` — tego wymagają strict-mode OBU providerów, więc odrzucamy przy submit, nie po zakolejkowaniu. Głębsza poprawność schematu i reguły znaków w `name` (wymóg OpenAI; Anthropic pola nie ma — adapter je pomija) zostają po stronie providera. W Pythonie pole nazywa się `json_schema` (`schema` cieniuje atrybut `BaseModel`), na drucie `schema` (`by_alias=True`).
 - **`ttl_s` (termin ważności joba) — opcjonalny, `> 0` jeśli podany** (§14 #22). Liczony **względem `submitted_at`**, nie jako absolutny timestamp: `submitted_at` już jest w kontrakcie, więc producent podaje jedną liczbę i obie strony nie muszą uzgadniać nic poza tym zegarem. Worker sprawdza termin **przed każdą próbą** — raz przed rezerwacją rate-limitu (żeby martwy job nie zjadał kwoty potrzebnej żywym) i raz po niej, tuż przed wydaniem pieniędzy (bo `acquire` potrafi przespać całe okno). Job po terminie kończy się **terminalnym `Result` `status="error"`**, nie cichym pominięciem: wiersz w store musi osiągnąć stan terminalny, inaczej producent, który jeszcze pollinguje, wisiałby do własnego timeoutu, a licznik `pending` (§11) rósłby w nieskończoność. `null` = brak terminu (batch — wynik odbierany później); producent pollingujący z własnym timeoutem **powinien** ustawić `ttl_s` równe swojemu czekaniu, żeby obie strony poddawały się razem.
+  **PRECONDITION — wspólny zegar (review 2026-07-22).** Termin jest liczony przez workera jako
+  `submitted_at + ttl_s` wobec **zegara workera**. Przy rozjeździe zegarów: worker spóźniony o
+  X sekund zacznie **płatne** wywołania do X sekund po tym, jak producent przestał czekać;
+  worker śpieszący się wygasza **ważne** joby za wcześnie. Dziś to nie boli, bo producent i
+  worker są **współlokowani na jednym boxie** (§9b) — jeden zegar, rozjazd zerowy z definicji.
+  **Jeśli bus kiedykolwiek rozjedzie się na dwa hosty, to przestaje być prawdą** i trzeba
+  wtedy: (a) wymusić NTP na obu i przyjąć tolerancję, albo (b) przejść na deadline absolutny z
+  jawnym marginesem na skew. Nie „naprawiać" tego zgadywanką po stronie workera — dopóki
+  współlokacja obowiązuje, to jest udokumentowane założenie, nie luka.
+  Naiwny (bez strefy) `submitted_at` jest **odrzucany w kontrakcie** — inaczej porównanie
+  wybuchłoby `TypeError` dopiero w środku ścieżki joba, po zakolejkowaniu. `ttl_s` musi być
+  **skończone i ≤ `MAX_TTL_S` (86 400 s)**: `inf` przechodziło naiwne `> 0`, serializowało się
+  do JSON-owego `null` i **po cichu wyłączało wygasanie** (deadline wyglądał na ustawiony i nie
+  robił nic), a wielkie skończone wartości wywracały `timedelta` na `OverflowError`.
 
 **Uwaga o nagłówkach Iggy:** metadane (`project`, `model`, `priority`) logicznie należą do **nagłówków wiadomości**, ale Python SDK ich nie ma → w v1 wszystko idzie w body JSON. To jest dokładnie miejsce na ewentualną rozbudowę SDK (nagłówki).
 
