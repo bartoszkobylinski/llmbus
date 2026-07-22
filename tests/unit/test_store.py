@@ -812,3 +812,53 @@ async def test_concurrent_publishes_do_not_collide(tmp_path):
     finally:
         for store in stores:
             await store.close()
+
+
+async def test_worker_rebuild_races_two_producer_connects_without_collision(tmp_path):
+    """Producer connects may overlap the worker's transactional stale-table
+    rebuild, but readers must neither repair the table nor break the writer."""
+    import aiosqlite
+
+    path = _db(tmp_path)
+    async with aiosqlite.connect(path) as raw:
+        await raw.execute(
+            """
+            CREATE TABLE worker_policy (
+                id            INTEGER PRIMARY KEY CHECK (id = 1),
+                max_attempts  INTEGER NOT NULL,
+                job_timeout_s REAL    NOT NULL,
+                base_delay_s  REAL    NOT NULL,
+                max_delay_s   REAL    NOT NULL,
+                worst_case_s  REAL    NOT NULL,
+                updated_at    TEXT    NOT NULL
+            )
+            """
+        )
+        await raw.execute(
+            "INSERT INTO worker_policy VALUES "
+            "(1, 4, 60.0, 0.5, 30.0, 243.5, '2026-01-01T00:00:00+00:00')"
+        )
+        await raw.commit()
+
+    worker = Store(path)
+    producers = [Store(path), Store(path)]
+    await worker.connect()
+
+    async def connect_and_read(producer: Store) -> PublishedWorkerPolicy | None:
+        await producer.connect()
+        return await producer.read_worker_policy()
+
+    try:
+        _, *observed = await asyncio.gather(
+            worker.publish_worker_policy(_policy(), updated_at=_SUBMITTED),
+            *(connect_and_read(producer) for producer in producers),
+        )
+        published = await worker.read_worker_policy()
+    finally:
+        await worker.close()
+        for producer in producers:
+            await producer.close()
+
+    assert published is not None
+    assert published.updated_at == _SUBMITTED
+    assert all(item is None or item == published for item in observed)
