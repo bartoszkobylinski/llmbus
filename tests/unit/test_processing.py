@@ -789,6 +789,74 @@ async def test_a_job_that_expires_while_waiting_on_the_rate_limiter_is_dropped(t
     await store.close()
 
 
+async def test_a_job_that_expires_after_backoff_never_starts_the_next_attempt(tmp_path):
+    """Every retry must repeat the deadline check before reserving or calling.
+
+    The first provider attempt is allowed while the job is live. Its transient
+    failure earns a backoff, but once that wait carries the job past its deadline
+    the second attempt must be refused without another quota reservation or call.
+    """
+    store = Store(str(tmp_path / "s.db"))
+    await store.connect()
+    provider = FakeProvider("openai", [TimeoutError("first attempt timed out"), ok_result()])
+    job = make_job(submitted_at=_T0, ttl_s=30)
+    await store.insert_pending(job)
+    clock = iter([_at(1), _at(2), _at(31)])
+    deps = build_deps(store, provider, now=lambda: next(clock))
+
+    result = await process_job(deps, job)
+
+    assert len(provider.calls) == 1
+    assert len(deps.rate_limiter.acquired) == 1
+    assert deps.sleep.calls == [0.5]
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("expired before attempt 2:")
+    await store.close()
+
+
+async def test_a_job_without_a_deadline_runs_even_far_after_submission(tmp_path):
+    """Batch producers deliberately opt out of expiry with ``ttl_s=None``."""
+    store = Store(str(tmp_path / "s.db"))
+    await store.connect()
+    provider = FakeProvider("openai", [ok_result()])
+    job = make_job(submitted_at=_T0, ttl_s=None)
+    await store.insert_pending(job)
+
+    result = await process_job(
+        build_deps(store, provider, now=lambda: _at(10_000)),
+        job,
+    )
+
+    assert result.status == "ok"
+    assert len(provider.calls) == 1
+    await store.close()
+
+
+async def test_redelivered_expired_job_never_calls_provider_or_duplicates_callback(tmp_path):
+    """The terminal error is one-shot under at-least-once message delivery."""
+    store = Store(str(tmp_path / "s.db"))
+    await store.connect()
+    provider = FakeProvider("openai", [])
+    job = make_job(submitted_at=_T0, ttl_s=30, callback_url="http://cb")
+    await store.insert_pending(job)
+    deps = build_deps(store, provider, now=lambda: _at(31))
+
+    first = await process_job(deps, job)
+    second = await process_job(deps, job)
+
+    assert first.status == "error"
+    assert second.status == "error"
+    assert provider.calls == []
+    assert deps.rate_limiter.acquired == []
+    assert len(deps.deliver_callback.deliveries) == 1
+    stored = await store.get(job.job_id)
+    assert stored is not None
+    assert stored.status == "error"
+    assert stored.error == first.error
+    await store.close()
+
+
 def test_the_default_clock_is_timezone_aware_utc():
     """WorkerDeps' default `now`. Tests inject a clock, so without this the real
     one ships unexercised — and a naive datetime here would raise on comparison

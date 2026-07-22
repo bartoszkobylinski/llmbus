@@ -47,6 +47,7 @@ def test_job_defaults():
     assert job.params == JobParams()
     assert job.callback_url is None
     assert job.meta == {}
+    assert job.ttl_s is None
 
 
 def test_job_default_containers_are_not_shared():
@@ -92,6 +93,7 @@ def test_job_round_trips_through_wire_json_with_submitted_at():
         job_id=f"urn:uuid:{_JOB_ID}",
         submitted_at=submitted_at,
         callback_url=None,
+        ttl_s=280.0,
     )
 
     wire_json = job.model_dump_json(by_alias=True)
@@ -100,12 +102,19 @@ def test_job_round_trips_through_wire_json_with_submitted_at():
     assert job.job_id == _JOB_ID
     assert wire["job_id"] == _JOB_ID
     assert wire["submitted_at"] == "2026-07-03T12:34:56Z"
+    assert wire["ttl_s"] == 280.0
     assert wire["params"] == {
         "temperature": None,
         "max_tokens": None,
         "response_format": None,
     }
     assert Job.model_validate_json(wire_json) == job
+
+
+@pytest.mark.parametrize("ttl_s", [0, -0.001, -1])
+def test_job_rejects_a_non_positive_ttl(ttl_s):
+    with pytest.raises(ValidationError):
+        _minimal_job(ttl_s=ttl_s)
 
 
 def test_job_meta_is_preserved_untouched():
