@@ -765,6 +765,33 @@ potrzebne, żeby odpowiedzieć na pytanie „ile wydałem i na co".
    `jobs.model` jest `NOT NULL` — więc job bez modelu fizycznie nie może trafić do store'a.
    Worker mimo to sprawdza (`_model_of`, `process_job`) i zwraca błędny `Result` zamiast
    rzucać: jedna zła wiadomość na topicu nie może zatrzymać pętli konsumpcji (§14 #15).
+   **UZUPEŁNIENIE (2026-07-23) — granulacja `kind` i ZDOLNOŚĆ modelu.** Przegląd milambera
+   pokazał, że `(project, kind)` musi być drobniejsze, niż wyglądało, bo **jeden moduł używa
+   kilku RÓŻNYCH rodzajów LLM-a**: samo `language/` to 7 wywołań chat, `ocr.py:79` (vision,
+   treść z `image_url`) i Whisper (`service.py:354`). Jedno `kind="language"` musiałoby
+   trzymać naraz model czatowy i `whisper-1` — czyli nie działa.
+   **(a) Taksonomii NIE wymyślamy — milamber już ją ma.** Jego `record_usage()` etykietuje
+   ruch per funkcja: `language.chat`, `language.assessment`, `language.plan`,
+   `language.session`, `language.daily_session`, `language.drills`, `language.check`,
+   `language.ocr`, `language.whisper`, `knowledge.embed`, `knowledge.recall`,
+   `knowledge.whisper`, `health.scan`, `instagram.series`. To są gotowe wartości `kind`.
+   Bonus, nie kosmetyczny: własne liczenie wydatku milambera (`usage/spend.py`) grupuje po
+   **tych samych** etykietach, więc po przepięciu na busa kubełki się zgadzają i nie trzeba
+   mapować liczb między dwoma systemami.
+   **(b) Rejestr modeli dostaje wymiar ZDOLNOŚCI** (`providers/base.py::CAPABILITIES`,
+   `chat` | `transcription` | `embedding`). Powód jest dokładnie taki jak w #6, tylko o
+   piętro wyżej: `PROVIDERS` mówi, że `whisper-1` obsługuje OpenAI, ale **nic** nie mówi, że
+   on transkrybuje, a nie rozmawia. Bez tego wymiaru dropdown pozwoliłby ustawić
+   `language.whisper → gpt-5.5`, a błąd wyszedłby dopiero u providera (albo gorzej — poszedłby
+   jako zwykły czat). Trzecia tabela trzymana w zamku testem, tak samo jak `PROVIDERS` wobec
+   `cost.PRICING`: model nie może być routowany bez zdolności ani zdolny bez route'u.
+   **Strona polityki filtruje dropdown po zdolności**, więc zła para po prostu nie jest do
+   wyboru — to jest właściwa obrona, wcześniejsza niż walidacja.
+   **(c) Wymuszenie przy submicie jest ODŁOŻONE do #24 i to jest uczciwa kolejność.** Żeby
+   `submit()` sprawdził „zdolność modelu == typ zadania", job musi ten typ **deklarować** —
+   a `Job.task` powstaje dopiero w §4 v2 (#24). Dziś więc zdolność jest **danymi dla UI**
+   (filtr dropdownu), nie bramką w kodzie. Nie udawajmy, że jest inaczej: dopóki wszystkie
+   zarejestrowane modele są `chat`, niezgodności nie da się nawet wyprodukować.
 
 24. **Transkrypcja (Whisper) na busie — §4 przestaje być tylko-chatowe.** **OTWARTE
    (postawione 2026-07-23), user potwierdził, że tego potrzebuje** (milamber:

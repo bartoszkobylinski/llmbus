@@ -5,10 +5,13 @@ from pydantic import ValidationError
 
 from llmbus.cost import PRICING
 from llmbus.providers.base import (
+    CAPABILITIES,
     PROVIDERS,
     Provider,
     ProviderResult,
     UnknownModelError,
+    capability_for,
+    models_with_capability,
     provider_for,
 )
 from llmbus.schema import JobParams, Message, Usage
@@ -91,6 +94,54 @@ def test_every_priced_model_has_a_non_empty_string_route():
 
 def test_every_route_names_a_known_provider():
     assert set(PROVIDERS.values()) == {"openai", "anthropic"}
+
+
+# --- capability (§14 #23: the bus must know what a model is FOR) -------------
+
+
+def test_capabilities_cover_exactly_the_routed_models():
+    # Third table, same lockstep rule as routing vs pricing: a model may never be
+    # routed without a capability, nor declared capable without a route. Once the
+    # bus picks models centrally, "which provider" is not enough to pick safely.
+    assert set(CAPABILITIES) == set(PROVIDERS)
+
+
+def test_every_capability_is_one_of_the_declared_kinds():
+    assert set(CAPABILITIES.values()) <= {"chat", "transcription", "embedding"}
+
+
+def test_every_model_registered_today_is_a_chat_model():
+    # Pins the current state honestly: transcription arrives with §4 v2 (§14 #24).
+    # When whisper-1 lands this test changes, and that change is the reminder that
+    # the policy UI now has a second capability to filter on.
+    assert set(CAPABILITIES.values()) == {"chat"}
+
+
+def test_capability_for_returns_the_registered_capability():
+    assert capability_for("gpt-5-nano") == "chat"
+
+
+def test_capability_for_is_fail_loud_on_an_unregistered_model():
+    # No assumed default: guessing "probably chat" is how a transcription model
+    # ends up in a chat call.
+    with pytest.raises(UnknownModelError, match="whisper-1"):
+        capability_for("whisper-1")
+
+
+def test_models_with_capability_lists_every_chat_model_sorted():
+    assert models_with_capability("chat") == sorted(PROVIDERS)
+
+
+def test_models_with_capability_is_empty_for_a_capability_nothing_serves_yet():
+    # The policy page must render an empty dropdown rather than raise.
+    assert models_with_capability("transcription") == []
+
+
+def test_models_with_capability_excludes_other_capabilities(monkeypatch):
+    monkeypatch.setitem(CAPABILITIES, "whisper-1", "transcription")
+
+    assert models_with_capability("transcription") == ["whisper-1"]
+    assert "whisper-1" not in models_with_capability("chat")
 
 
 # --- ProviderResult ----------------------------------------------------------

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from llmbus.schema import JobParams, Message, Usage
 
@@ -39,12 +39,59 @@ PROVIDERS: dict[str, str] = {
 }
 
 
+# What a model is *for*. Routing alone is not enough once the bus chooses models
+# centrally (§14 #23): `PROVIDERS` says `whisper-1` is served by OpenAI, but
+# nothing there says it transcribes rather than chats — so a policy row could
+# point a chat task at it and the mistake would surface at the provider, or worse
+# be sent as a chat call. The policy UI filters its dropdown on this, so the wrong
+# pairing is not selectable in the first place.
+Capability = Literal["chat", "transcription", "embedding"]
+
+# model → what it serves. Kept in lockstep with `PROVIDERS` by a test, the same
+# way `PROVIDERS` is kept in lockstep with `cost.PRICING`: a model can never be
+# routed without a capability, nor declared capable without a route. Every entry
+# is "chat" today; `transcription` arrives with §4 v2 (§14 #24) and `embedding`
+# after it.
+CAPABILITIES: dict[str, Capability] = {
+    "gpt-5": "chat",
+    "gpt-5-mini": "chat",
+    "gpt-5-nano": "chat",
+    "gpt-5.4-mini": "chat",
+    "claude-opus-4-8": "chat",
+    "claude-sonnet-5": "chat",
+    "claude-haiku-4-5": "chat",
+}
+
+
 def provider_for(model: str) -> str:
     """Name of the provider that serves `model`, or raise `UnknownModelError`."""
     try:
         return PROVIDERS[model]
     except KeyError:
         raise UnknownModelError(model) from None
+
+
+def capability_for(model: str) -> Capability:
+    """What `model` serves, or raise `UnknownModelError`.
+
+    Same fail-loud shape as `provider_for`: an unregistered model has no assumed
+    capability. Guessing "probably chat" is how a transcription model ends up in
+    a chat call.
+    """
+    try:
+        return CAPABILITIES[model]
+    except KeyError:
+        raise UnknownModelError(model) from None
+
+
+def models_with_capability(capability: Capability) -> list[str]:
+    """Every registered model serving `capability`, sorted.
+
+    This is what the policy page offers in its dropdown (§14 #23), so a row for a
+    transcription task cannot be pointed at a chat model by hand. Sorted so the UI
+    order is stable rather than dependent on dict insertion.
+    """
+    return sorted(model for model, served in CAPABILITIES.items() if served == capability)
 
 
 def _reject_priced_usage(usage: Usage) -> None:
