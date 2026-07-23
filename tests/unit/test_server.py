@@ -94,6 +94,26 @@ def test_build_servers_with_a_single_host_opens_one_socket():
     assert len(servers) == 1
 
 
+def test_build_servers_closes_open_sockets_when_a_later_bind_fails():
+    opened = []
+
+    def fail_second_bind(address, handler):
+        if opened:
+            raise OSError("second address is unavailable")
+        server = _FakeServer(address, handler)
+        opened.append(server)
+        return server
+
+    with pytest.raises(OSError, match="second address is unavailable"):
+        build_servers(
+            "/x.db",
+            CostsBind(("127.0.0.1", "100.124.41.86"), 8093),
+            factory=fail_second_bind,
+        )
+
+    assert opened[0].closed == 1
+
+
 # --- shutdown ---------------------------------------------------------------
 
 
@@ -220,6 +240,15 @@ def test_resolve_bind_mixes_a_flag_port_with_environment_hosts(monkeypatch):
     assert resolve_bind(None, 8500) == CostsBind(("127.0.0.1", "100.124.41.86"), 8500)
 
 
+def test_resolve_bind_deduplicates_explicit_hosts(monkeypatch):
+    monkeypatch.delenv("COSTS_BIND_HOSTS", raising=False)
+
+    assert resolve_bind(["127.0.0.1", "127.0.0.1"], 8093) == CostsBind(
+        ("127.0.0.1",),
+        8093,
+    )
+
+
 # --- main() -----------------------------------------------------------------
 
 
@@ -237,6 +266,32 @@ def test_main_refuses_an_unbindable_port(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("COSTS_PORT", "70000")
 
     code = main(["--store-path", path])
+
+    assert code == 2
+    assert "must be a valid port" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", ""])
+def test_main_refuses_an_explicit_unsafe_host(host, tmp_path, monkeypatch, capsys):
+    path = str(tmp_path / "store.db")
+    _seed(path)
+    monkeypatch.setattr("llmbus.config.load_dotenv", lambda: None)
+    monkeypatch.setattr("llmbus.server.ThreadingHTTPServer", _FakeServer)
+
+    code = main(["--store-path", path, "--host", host])
+
+    assert code == 2
+    assert "llmbus-costs-serve:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("port", ["0", "-1", "70000"])
+def test_main_refuses_an_explicit_unbindable_port(port, tmp_path, monkeypatch, capsys):
+    path = str(tmp_path / "store.db")
+    _seed(path)
+    monkeypatch.setattr("llmbus.config.load_dotenv", lambda: None)
+    monkeypatch.setattr("llmbus.server.ThreadingHTTPServer", _FakeServer)
+
+    code = main(["--store-path", path, "--port", port])
 
     assert code == 2
     assert "must be a valid port" in capsys.readouterr().err

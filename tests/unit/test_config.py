@@ -334,6 +334,19 @@ def test_costs_bind_falls_back_to_loopback_when_the_list_is_blank():
     assert parse_costs_bind({"COSTS_BIND_HOSTS": "  ,  "}).hosts == ("127.0.0.1",)
 
 
+@pytest.mark.parametrize(
+    "hosts",
+    [
+        "0.0.0.0",
+        "127.0.0.1,0.0.0.0",
+        "0.0.0.0,100.124.41.86",
+    ],
+)
+def test_costs_bind_rejects_the_unauthenticated_ipv4_wildcard(hosts):
+    with pytest.raises(ConfigError, match="0\\.0\\.0\\.0"):
+        parse_costs_bind({"COSTS_BIND_HOSTS": hosts})
+
+
 def test_costs_bind_reads_an_explicit_port():
     assert parse_costs_bind({"COSTS_PORT": "9000"}).port == 9000
 

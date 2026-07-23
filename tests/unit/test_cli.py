@@ -107,6 +107,12 @@ def test_require_existing_store_refuses_a_path_that_is_not_there(tmp_path):
         require_existing_store(str(tmp_path / "absent.db"))
 
 
+def test_require_existing_store_refuses_a_directory(tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        require_existing_store(str(tmp_path))
+    assert str(tmp_path) in str(caught.value)
+
+
 def test_require_existing_store_does_not_create_the_file_it_rejects(tmp_path):
     absent = tmp_path / "absent.db"
     with pytest.raises(ConfigError):
