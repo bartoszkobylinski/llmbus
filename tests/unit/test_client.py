@@ -639,3 +639,49 @@ async def test_a_policy_naming_an_unroutable_model_still_fails_before_any_side_e
 
     assert store.inserted == []
     assert iggy.sent == []
+
+
+async def test_a_duplicate_submit_sends_the_model_already_on_record(tmp_path, monkeypatch):
+    # The explicit-model twin of Codex's policy case, and it predates §14 #23:
+    # first-write-wins means the row keeps the FIRST model, so a re-submit naming
+    # a different one used to send a model the row did not name. The worker would
+    # then call the newer model and price it correctly while the ledger attributed
+    # that spend to the older one.
+    payloads = []
+
+    def capture_send_message(payload):
+        payloads.append(payload)
+        return object()
+
+    monkeypatch.setattr(client_module, "SendMessage", capture_send_message)
+    async with Store(str(tmp_path / "dup.db")) as store:
+        bus = BusClient(iggy=FakeIggyClient(), store=store)
+        first = make_job(model="gpt-5-nano")
+
+        await bus.submit(first)
+        await bus.submit(first.model_copy(update={"model": "gpt-5.4"}))
+
+        stored = await store.get(first.job_id)
+
+    assert stored.model == "gpt-5-nano"
+    assert [json.loads(p)["model"] for p in payloads] == ["gpt-5-nano", "gpt-5-nano"]
+
+
+async def test_a_first_submit_is_never_re_read_from_the_store(tmp_path, monkeypatch):
+    # The alignment read must cost nothing on the normal path: it only runs when
+    # insert_pending reports the row was already there.
+    monkeypatch.setattr(client_module, "SendMessage", lambda payload: object())
+    async with Store(str(tmp_path / "first.db")) as store:
+        reads = []
+        original_get = store.get
+
+        async def counting_get(job_id):
+            reads.append(job_id)
+            return await original_get(job_id)
+
+        monkeypatch.setattr(store, "get", counting_get)
+        bus = BusClient(iggy=FakeIggyClient(), store=store)
+
+        await bus.submit(make_job(model="gpt-5-nano"))
+
+        assert reads == []

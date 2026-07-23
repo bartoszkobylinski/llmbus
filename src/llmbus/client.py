@@ -222,11 +222,27 @@ class BusClient:
         a startup-visible bug instead of a queue full of errors. Producer and worker
         resolve the *same* routing table from the same install (§14 #3), so this can
         never reject a model the worker would have served.
+
+        **A duplicate carries the model already on record, not a freshly chosen
+        one.** The store is first-write-wins (§6), so a second submit of the same
+        `job_id` leaves the row's model untouched — but the message it sends would
+        otherwise carry whatever the *current* choice is. Those two disagreeing is
+        an audit corruption, not a cosmetic difference: the worker would call the
+        newer model and price it correctly, while the row kept naming the older
+        one, so the ledger would attribute real spend to a model that never ran.
+        Sending what the store recorded keeps the row and the topic telling the
+        same story.
+
+        Reachable two ways. With `model=None` a policy edit between the two
+        submits is enough — the producer does nothing unusual (§14 #23). But it
+        predates the policy work: an explicit re-submit naming a different model
+        drifted the same way, and is fixed by the same alignment.
         """
         model = await self._resolve_model_name(job)
         resolved = job.model_copy(update={"model": model})
         provider_for(model)
-        await self._store.insert_pending(resolved)
+        if not await self._store.insert_pending(resolved):
+            resolved = await self._model_already_on_record(resolved)
         await send_job(self._iggy, resolved, self._topology)
         _log.debug(
             "submitted job %s to %s/%s",
@@ -235,6 +251,24 @@ class BusClient:
             self._topology.topic,
         )
         return resolved.job_id
+
+    async def _model_already_on_record(self, job: Job) -> Job:
+        """Re-point a duplicate submit at the model its store row already names.
+
+        Only runs when `insert_pending` reported the row was already there, so the
+        extra read costs nothing on the normal path. A missing row (deleted
+        between the two calls) or an already-matching model leaves the job alone.
+        """
+        stored = await self._store.get(job.job_id)
+        if stored is None or stored.model == job.model:
+            return job
+        _log.info(
+            "job %s already recorded as %s; sending that instead of %s",
+            job.job_id,
+            stored.model,
+            job.model,
+        )
+        return job.model_copy(update={"model": stored.model})
 
     async def _resolve_model_name(self, job: Job) -> str:
         """The concrete model for `job`, from the central policy when unset (§14 #23).
