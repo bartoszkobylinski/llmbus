@@ -724,3 +724,67 @@ potrzebne, żeby odpowiedzieć na pytanie „ile wydałem i na co".
    **Konsekwencja dla §3/§14 #1:** „generyczny worker" z #1 stoi bez zmian; to **wyłącznie**
    wybór sposobu dostawy dla pilota. Gdy pojawi się konsument, który naprawdę nie może czekać
    (batch news?), callback jest gotowy i nieużywany, nie do napisania.
+23. **Centralny wybór modelu — kto decyduje, którym modelem leci job?** **OTWARTE
+   (postawione 2026-07-23), kierunek uzgodniony z userem: polityka po stronie busa,
+   klucz `(project, kind)`.**
+   **Problem, realny i zmierzony:** model żyje dziś w KAŻDYM projekcie osobno. W samym
+   milamberze: `parser/openai_parser.py:11` (`DEFAULT_MODEL`, env `OPENAI_MODEL`), `:261`
+   (`STONE_VISION_MODEL`), `:366` (`ESTIMATION_MODEL`), `api/routers/training.py:545,591`
+   (`gpt-5.4` wpisany na sztywno), `db/models/language.py:74-77` (picker usera) i
+   `bot/commands/admin.py:21-34` (przełącznik admina, 14 modeli). User: „nie jestem w stanie
+   pamiętać, gdzie i czego używam" — i to jest właściwa diagnoza, nie wygoda.
+   **Kształt:** tabela `model_policy` w store — `(project, kind) → model, updated_at`, ten
+   sam wzorzec co `worker_policy` (#21). `Job.model` staje się **opcjonalny**: `None` =
+   „bus decyduje", a `BusClient.submit()` **rozwiązuje politykę w momencie submitu** i kładzie
+   na drut **konkretny** model. Jawny model wygrywa (pinowanie zostaje możliwe).
+   **Dlaczego rozwiązanie po stronie klienta, a nie workera:** job na topicu i wiersz w store
+   zawsze niosą konkretny model, więc audyt (§11) i koszt (§6) pozostają dokładne, a walidacja
+   fail-loud z #6 nadal pada **w miejscu wywołania**, nie rundę później. Rozwiązywanie w
+   workerze odwróciłoby kontrakt i osłabiło #6.
+   **GRANICA, której nie przekraczamy:** UI zmienia **wybór** modelu (dropdown po już
+   zarejestrowanych), ale **NIE ceny**. `cost.py` trzyma datowaną historię cen w kodzie —
+   to ona sprawia, że zaplanowana zmiana ceny rozwiązuje się sama i że job wycenia się stawką
+   z dnia `submitted_at`. Formularz nad tym znaczy, że jedna literówka **wstecznie** psuje
+   każdą liczbę na stronie, bez niczego, co by to złapało. Dodanie modelu zostaje małym PR-em
+   ze **zweryfikowaną** ceną (wzór: `notes/model-pricing-openai.md`).
+   **Nowe ryzyko, którego strona kosztu dotąd nie miała: to jest powierzchnia ZAPISU.**
+   Read-only stroną dało się goło (tailnet = granica dostępu). Strona, która zmienia model,
+   ma za sobą pieniądze: wg tabeli milambera `gpt-5.5-pro` to 30/180 za Mtok wobec 0,05/0,40
+   dla `gpt-5-nano` — ~600× na wejściu. Tailnet nie jest jednoosobowy (`tailscale status`:
+   `macbook-air-adam`). **Decyzja usera (2026-07-23): auth na stronie.**
+   **Do rozstrzygnięcia przy wdrożeniu:** co robi `submit()`, gdy dla `(project, kind)` nie
+   ma wiersza — twardy błąd czy `DEFAULT_MODEL` z configu. Skłaniam się do twardego: cicha
+   domyślka to dokładnie ten rozjazd, który #23 likwiduje.
+
+24. **Transkrypcja (Whisper) na busie — §4 przestaje być tylko-chatowe.** **OTWARTE
+   (postawione 2026-07-23), user potwierdził, że tego potrzebuje** (milamber:
+   `knowledge/whisper.py`, `podcast/audio_transcribe.py`).
+   To **cofa** część §14 #18 / §12: tam „nie-chatowy typ to scope creep, bo żaden konsument
+   go nie wymusza". Teraz konsument go wymusza, więc argument upadł — ale rachunek się nie
+   zmienił, tylko druga strona zaczęła ważyć więcej.
+   **(a) Audio NIE MOŻE jechać w wiadomości.** `whisper.py:38` wysyła surowe bajty, limit
+   25 MB (`api/routers/language.py:115`), a `podcast/audio_transcribe.py:28` **tnie** odcinki,
+   bo regularnie ten limit przekraczają. Base64 w JSON to ~33 MB **na wiadomość**, na topicu,
+   który jest **trwałym logiem audytowym** (§11), na boxie z problemem OOM i bez swapu
+   (runbook). Jeden podcast to dziesiątki takich wiadomości, trzymanych na zawsze.
+   **Kształt:** `Job` niesie **ścieżkę**, nie bajty. Producent i worker są już współlokowani
+   (§9b — dzielą plik store'a), więc worker otwiera plik sam. **Wymaga skonfigurowanego
+   katalogu-korzenia** (`WORKER_AUDIO_ROOT`): ścieżka od producenta bez tego to dowolny odczyt
+   pliku przez worker.
+   **(b) Whisper nie jest wyceniany po tokenach.** `whisper.py:8,46`: `(duration/60) * 0.006`
+   — za minutę audio. `cost.py` liczy `input_tokens × stawka + output_tokens × stawka`, a
+   `Usage` nie ma pola na czas. Obie rzeczy dostają drugi wymiar (`audio_seconds`).
+   Uwaga: `audio_transcribe.py:7` sam pisze, że koszt to „duration × rate, NEVER an
+   LLM-estimated" — ten sam instynkt co `cost.py`, więc po spięciu będą zgodne.
+   **(c) Polityka modelu (#23) nic tu nie daje** — `whisper-1` to jedyny model. Wartość
+   Whispera na busie to **wyłącznie** widoczność kosztu i wspólny retry, nie wybór modelu.
+   **(d) `kind` NIE służy do dispatchu.** §14 #1 mówi wprost, że worker nie zna semantyki
+   `kind`; użycie go do wyboru ścieżki złamałoby tę decyzję. Dispatch idzie po `task.type`.
+   **Proponowany §4 v2 (jedna zmiana kontraktu zamiast dwóch):**
+   `Job.task: ChatTask | TranscriptionTask` (dyskryminowane po `type`), `Job.model: str | None`
+   (#23). Embeddingi wchodzą później w tę samą unię **bez kolejnego łamania kontraktu** — są
+   łatwiejsze niż Whisper (wejście tekstowe, rozliczenie tokenowe).
+   **Migracja:** hate-moderator stoi na obecnym kształcie **na produkcji**. Górne `messages`
+   zostaje akceptowane przez jedno wydanie (deprecated), żeby żywy konsument nie musiał
+   lądować w tej samej minucie co bus. Rate-limit (`ratelimit.py`) rezerwuje dziś tokeny —
+   transkrypcja nie ma wejściowych, więc dostaje rezerwację tylko-requestową.
