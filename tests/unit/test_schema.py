@@ -13,9 +13,11 @@ from llmbus.schema import (
     Job,
     JobParams,
     Message,
+    ModelPolicyError,
     ResponseFormat,
     Result,
     Usage,
+    resolve_model,
 )
 
 # Valid UUIDs for Result tests — job_id must parse as a UUID under the contract.
@@ -764,3 +766,61 @@ def test_the_maximum_ttl_is_accepted_and_a_hair_over_is_not():
 
 def test_no_ttl_means_no_deadline():
     assert Job(**_job_kwargs()).ttl_s is None
+
+
+# --- resolve_model / central model policy (§14 #23) --------------------------
+
+
+def _policy_job(**overrides):
+    data = {
+        "project": "milamber",
+        "kind": "series_classify",
+        "messages": [Message(role="user", content="hi")],
+    }
+    data.update(overrides)
+    return Job(**data)
+
+
+def test_job_model_defaults_to_none_meaning_the_bus_decides():
+    assert _policy_job().model is None
+
+
+def test_resolve_model_uses_the_policy_when_the_job_named_no_model():
+    assert resolve_model(_policy_job(), "gpt-5.4") == "gpt-5.4"
+
+
+def test_resolve_model_keeps_an_explicit_model_and_ignores_the_policy():
+    # Pinning must survive a policy change, or a producer that deliberately chose
+    # a model would silently drift the next time someone edits the table.
+    assert resolve_model(_policy_job(model="gpt-5-nano"), "gpt-5.4") == "gpt-5-nano"
+
+
+def test_resolve_model_keeps_an_explicit_model_when_there_is_no_policy_at_all():
+    assert resolve_model(_policy_job(model="gpt-5-nano"), None) == "gpt-5-nano"
+
+
+def test_resolve_model_hard_fails_when_neither_the_job_nor_a_policy_names_one():
+    # Deliberately not a fallback to some default: a silent default is exactly the
+    # drift §14 #23 exists to remove.
+    with pytest.raises(ModelPolicyError) as caught:
+        resolve_model(_policy_job(), None)
+    assert str(caught.value) == (
+        "no model policy for project 'milamber' kind 'series_classify', and the job set no model"
+    )
+
+
+def test_resolve_model_error_names_the_pair_that_was_missing():
+    with pytest.raises(ModelPolicyError) as caught:
+        resolve_model(_policy_job(project="hate-moderator", kind="classify"), None)
+    assert "'hate-moderator'" in str(caught.value)
+    assert "'classify'" in str(caught.value)
+
+
+def test_model_policy_error_is_a_value_error():
+    # Producers already catch ValueError around submit validation; this joins it
+    # rather than inventing a parallel hierarchy.
+    assert issubclass(ModelPolicyError, ValueError)
+
+
+def test_a_job_may_still_be_constructed_with_an_explicit_model():
+    assert _policy_job(model="claude-haiku-4-5").model == "claude-haiku-4-5"

@@ -10,6 +10,7 @@ here we test everything else against fakes and an in-memory store: `encode_job`,
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import pytest
 from apache_iggy import SendMessage
@@ -25,8 +26,16 @@ from llmbus.client import (
     send_job,
 )
 from llmbus.providers.base import UnknownModelError
-from llmbus.schema import Job, JobParams, Message, ResponseFormat, Result, Usage
-from llmbus.store import Store, StoredJob
+from llmbus.schema import (
+    Job,
+    JobParams,
+    Message,
+    ModelPolicyError,
+    ResponseFormat,
+    Result,
+    Usage,
+)
+from llmbus.store import ModelPolicy, Store, StoredJob
 from llmbus.worker import DEFAULT_TOPOLOGY, Topology, decode_job
 
 # --- fakes -------------------------------------------------------------------
@@ -78,14 +87,24 @@ class FailingSendIggyClient(FakeIggyClient):
 class RecordingStore:
     """Minimal submit-side store fake with an observable call record."""
 
-    def __init__(self, events):
+    def __init__(self, events, policy=None):
         self.events = events
         self.inserted = []
+        # What `model_policy()` will answer, and a record of every lookup — so a
+        # test can assert the producer did NOT query the table for a job that
+        # already named its model.
+        self.policy = policy
+        self.policy_lookups = []
 
     async def insert_pending(self, job):
         self.inserted.append(job)
         self.events.append(("store.insert_pending", job))
         return True
+
+    async def model_policy(self, project, kind):
+        self.policy_lookups.append((project, kind))
+        self.events.append(("store.model_policy", (project, kind)))
+        return self.policy
 
 
 # --- builders ----------------------------------------------------------------
@@ -528,3 +547,95 @@ async def test_worker_policy_reads_back_what_the_worker_published():
     # instead of hardcoding a belief about the worker's .env.
     assert published.retry_budget_s == 60.5
     assert published.max_attempts == 2
+
+
+# --- central model policy at submit (§14 #23) --------------------------------
+
+
+def _policy(model, project="hate-moderator", kind="classify"):
+    return ModelPolicy(
+        project=project,
+        kind=kind,
+        model=model,
+        updated_at=datetime(2026, 7, 23, 9, 0, tzinfo=timezone.utc),
+    )
+
+
+async def test_submit_resolves_the_model_from_policy_when_the_job_names_none():
+    store = RecordingStore([], policy=_policy("gpt-5.4-mini"))
+    iggy = FakeIggyClient()
+    bus = make_client(store, iggy)
+
+    await bus.submit(make_job(model=None))
+
+    assert store.policy_lookups == [("hate-moderator", "classify")]
+    assert store.inserted[0].model == "gpt-5.4-mini"
+
+
+async def test_the_job_put_on_the_wire_carries_the_resolved_model_not_null(monkeypatch):
+    # The point of resolving at submit: the audit log (§11) and the ledger (§6)
+    # must never hold a job whose model is "whatever the policy said later".
+    payloads = []
+
+    def capture_send_message(payload):
+        payloads.append(payload)
+        return object()
+
+    # Same boundary trick as the response_format wire test: SendMessage is an
+    # opaque Rust value, so only its constructor is replaced to read the bytes.
+    monkeypatch.setattr(client_module, "SendMessage", capture_send_message)
+    bus = make_client(RecordingStore([], policy=_policy("gpt-5.4-mini")), FakeIggyClient())
+
+    await bus.submit(make_job(model=None))
+
+    assert decode_job(payloads[0].encode()).model == "gpt-5.4-mini"
+    assert json.loads(payloads[0])["model"] == "gpt-5.4-mini"
+
+
+async def test_an_explicit_model_is_kept_and_the_policy_is_never_read():
+    store = RecordingStore([], policy=_policy("gpt-5.4-mini"))
+    iggy = FakeIggyClient()
+    bus = make_client(store, iggy)
+
+    await bus.submit(make_job(model="gpt-5-nano"))
+
+    assert store.policy_lookups == []
+    assert store.inserted[0].model == "gpt-5-nano"
+
+
+async def test_submit_hard_fails_when_no_policy_exists_for_the_pair():
+    store = RecordingStore([], policy=None)
+    iggy = FakeIggyClient()
+    bus = make_client(store, iggy)
+
+    with pytest.raises(ModelPolicyError, match="hate-moderator"):
+        await bus.submit(make_job(model=None))
+
+
+async def test_a_missing_policy_leaves_no_store_row_and_sends_nothing():
+    # Same fail-loud shape as the unknown-model guard: nothing half-submitted.
+    events = []
+    store = RecordingStore(events, policy=None)
+    iggy = FakeIggyClient(events=events)
+    bus = make_client(store, iggy)
+
+    with pytest.raises(ModelPolicyError):
+        await bus.submit(make_job(model=None))
+
+    assert store.inserted == []
+    assert iggy.sent == []
+
+
+async def test_a_policy_naming_an_unroutable_model_still_fails_before_any_side_effect():
+    # The policy table is not trusted more than a producer: the resolved model
+    # goes through the same provider_for check.
+    events = []
+    store = RecordingStore(events, policy=_policy("unroutable-model"))
+    iggy = FakeIggyClient(events=events)
+    bus = make_client(store, iggy)
+
+    with pytest.raises(UnknownModelError, match="unroutable-model"):
+        await bus.submit(make_job(model=None))
+
+    assert store.inserted == []
+    assert iggy.sent == []

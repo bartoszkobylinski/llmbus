@@ -15,6 +15,7 @@ from llmbus.schema import Job, Message, Result, Usage
 from llmbus.store import (
     _WORKER_POLICY_COLUMNS,
     PENDING,
+    ModelPolicy,
     ProjectDayCost,
     PublishedWorkerPolicy,
     Store,
@@ -862,3 +863,92 @@ async def test_worker_rebuild_races_two_producer_connects_without_collision(tmp_
     assert published is not None
     assert published.updated_at == _SUBMITTED
     assert all(item is None or item == published for item in observed)
+
+
+# --- model_policy (central model choice, §14 #23) ----------------------------
+
+_CHANGED = datetime(2026, 7, 23, 9, 0, tzinfo=timezone.utc)
+
+
+async def test_model_policy_is_absent_until_someone_sets_one(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        assert await store.model_policy("milamber", "series_classify") is None
+
+
+async def test_set_then_read_a_model_policy(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        await store.set_model_policy("milamber", "series_classify", "gpt-5-nano", _CHANGED)
+        assert await store.model_policy("milamber", "series_classify") == ModelPolicy(
+            project="milamber", kind="series_classify", model="gpt-5-nano", updated_at=_CHANGED
+        )
+
+
+async def test_setting_a_policy_again_replaces_the_choice(tmp_path):
+    # Upsert, so the table describes the model in force NOW — the same reason
+    # publish_worker_policy upserts rather than appending.
+    later = _CHANGED + timedelta(hours=2)
+    async with Store(_db(tmp_path)) as store:
+        await store.set_model_policy("milamber", "training.analyze", "gpt-5-nano", _CHANGED)
+        await store.set_model_policy("milamber", "training.analyze", "gpt-5.4", later)
+
+        policy = await store.model_policy("milamber", "training.analyze")
+        assert (policy.model, policy.updated_at) == ("gpt-5.4", later)
+
+
+async def test_two_kinds_in_one_project_hold_different_models(tmp_path):
+    # The whole reason the key is (project, kind) and not project alone.
+    async with Store(_db(tmp_path)) as store:
+        await store.set_model_policy("milamber", "training.analyze", "gpt-5.4", _CHANGED)
+        await store.set_model_policy("milamber", "series_classify", "gpt-5-nano", _CHANGED)
+
+        assert (await store.model_policy("milamber", "training.analyze")).model == "gpt-5.4"
+        assert (await store.model_policy("milamber", "series_classify")).model == "gpt-5-nano"
+
+
+async def test_the_same_kind_in_two_projects_is_independent(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        await store.set_model_policy("a", "classify", "gpt-5-nano", _CHANGED)
+        await store.set_model_policy("b", "classify", "gpt-5.4", _CHANGED)
+
+        assert (await store.model_policy("a", "classify")).model == "gpt-5-nano"
+        assert (await store.model_policy("b", "classify")).model == "gpt-5.4"
+
+
+async def test_an_unset_pair_reads_as_none_even_when_the_project_has_others(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        await store.set_model_policy("milamber", "training.analyze", "gpt-5.4", _CHANGED)
+        assert await store.model_policy("milamber", "nothing_here") is None
+
+
+async def test_list_model_policies_is_empty_on_a_fresh_store(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        assert await store.list_model_policies() == []
+
+
+async def test_list_model_policies_orders_by_project_then_kind(tmp_path):
+    async with Store(_db(tmp_path)) as store:
+        await store.set_model_policy("milamber", "training.analyze", "gpt-5.4", _CHANGED)
+        await store.set_model_policy("hate-moderator", "classify", "gpt-5.4-mini", _CHANGED)
+        await store.set_model_policy("milamber", "series_classify", "gpt-5-nano", _CHANGED)
+
+        assert [(p.project, p.kind) for p in await store.list_model_policies()] == [
+            ("hate-moderator", "classify"),
+            ("milamber", "series_classify"),
+            ("milamber", "training.analyze"),
+        ]
+
+
+async def test_model_policy_survives_reopening_the_store(tmp_path):
+    path = _db(tmp_path)
+    async with Store(path) as store:
+        await store.set_model_policy("milamber", "series_classify", "gpt-5-nano", _CHANGED)
+    async with Store(path) as reopened:
+        assert (await reopened.model_policy("milamber", "series_classify")).model == "gpt-5-nano"
+
+
+async def test_a_reader_sees_a_policy_written_by_another_connection(tmp_path):
+    # The producer reads this table on every submit while the UI writes it.
+    path = _db(tmp_path)
+    async with Store(path) as writer, Store(path) as reader:
+        await writer.set_model_policy("milamber", "series_classify", "gpt-5.4", _CHANGED)
+        assert (await reader.model_policy("milamber", "series_classify")).model == "gpt-5.4"

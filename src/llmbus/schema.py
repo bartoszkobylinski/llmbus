@@ -145,7 +145,17 @@ class Job(BaseModel):
     job_id: JobId = Field(default_factory=_new_job_id)
     project: str
     kind: str
-    model: str
+    # `None` means "the bus decides" (§14 #23): `BusClient.submit` resolves it from
+    # the `model_policy` table keyed `(project, kind)` and puts the *resolved*
+    # model on the wire, so the job on the topic and the row in the store always
+    # name a concrete model. An explicit value still wins, so a producer that
+    # needs a pinned model keeps one.
+    #
+    # Optional here rather than resolved worker-side on purpose: resolving at
+    # submit keeps the audit log (§11) and the cost ledger (§6) exact, and keeps
+    # the fail-loud model check (§14 #6) at the producer's call site instead of a
+    # round trip later.
+    model: str | None = None
     messages: list[Message]
     params: JobParams = Field(default_factory=JobParams)
     callback_url: str | None = None
@@ -195,3 +205,38 @@ class Result(BaseModel):
     provider: str | None = None
     error: str | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelPolicyError(ValueError):
+    """No model could be resolved for a job (§14 #23).
+
+    Raised when a job leaves `model` unset and the `model_policy` table has no
+    row for its `(project, kind)`. Deliberately a hard failure rather than a
+    fallback to some configured default: a silent default is exactly the drift
+    #23 exists to remove — it would let a project quietly run on a model nobody
+    chose for it, which is indistinguishable from the "which model is this
+    using?" problem the central policy is meant to answer.
+    """
+
+
+def resolve_model(job: Job, policy_model: str | None) -> str:
+    """The concrete model for `job`, falling back to the policy when unset.
+
+    Returns the model *name* rather than a rewritten `Job` so the result is a
+    plain `str`: the caller gets something the type checker knows is concrete,
+    instead of a `Job` whose optional field is non-None only by convention.
+
+    Pure: the caller supplies the policy lookup's answer, so the whole resolution
+    rule sits in the mutation gate with no store, no clock, and no I/O.
+
+    An explicit `job.model` wins — pinning stays possible, and a producer that
+    already decided is never second-guessed.
+    """
+    if job.model is not None:
+        return job.model
+    if policy_model is None:
+        raise ModelPolicyError(
+            f"no model policy for project {job.project!r} kind {job.kind!r}, "
+            "and the job set no model"
+        )
+    return policy_model

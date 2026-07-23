@@ -752,9 +752,19 @@ potrzebne, żeby odpowiedzieć na pytanie „ile wydałem i na co".
    ma za sobą pieniądze: wg tabeli milambera `gpt-5.5-pro` to 30/180 za Mtok wobec 0,05/0,40
    dla `gpt-5-nano` — ~600× na wejściu. Tailnet nie jest jednoosobowy (`tailscale status`:
    `macbook-air-adam`). **Decyzja usera (2026-07-23): auth na stronie.**
-   **Do rozstrzygnięcia przy wdrożeniu:** co robi `submit()`, gdy dla `(project, kind)` nie
-   ma wiersza — twardy błąd czy `DEFAULT_MODEL` z configu. Skłaniam się do twardego: cicha
-   domyślka to dokładnie ten rozjazd, który #23 likwiduje.
+   **ROZSTRZYGNIĘTE (2026-07-23, user): brak wiersza dla `(project, kind)` = TWARDY BŁĄD**
+   (`ModelPolicyError` w `submit()`, przed zapisem `pending` i przed wysyłką na Iggy).
+   Cicha domyślka byłaby dokładnie tym rozjazdem, który #23 likwiduje: projekt chodziłby
+   na modelu, którego nikt dla niego nie wybrał — czyli znów „nie wiem, czego używam".
+   **Wdrożone (PR `model-policy`):** tabela `model_policy` (`(project, kind)` jako klucz
+   główny, upsert), `Job.model: str | None`, czysta `schema.resolve_model` (bramka
+   mutacyjna) i `BusClient._resolve_model_name`. Tabela nie jest ufana bardziej niż
+   producent — model z polityki przechodzi przez ten sam `provider_for` (#6), więc polityka
+   wskazująca nieroutowalny model pada tak samo głośno i bez skutków ubocznych.
+   **Dwie warstwy niezmiennika:** `submit()` rozwiązuje model *przed* zapisem, a kolumna
+   `jobs.model` jest `NOT NULL` — więc job bez modelu fizycznie nie może trafić do store'a.
+   Worker mimo to sprawdza (`_model_of`, `process_job`) i zwraca błędny `Result` zamiast
+   rzucać: jedna zła wiadomość na topicu nie może zatrzymać pętli konsumpcji (§14 #15).
 
 24. **Transkrypcja (Whisper) na busie — §4 przestaje być tylko-chatowe.** **OTWARTE
    (postawione 2026-07-23), user potwierdził, że tego potrzebuje** (milamber:

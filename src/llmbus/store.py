@@ -74,7 +74,22 @@ CREATE TABLE IF NOT EXISTS worker_policy (
 );
 """
 
-_SCHEMA = _JOBS_SCHEMA + _WORKER_POLICY_SCHEMA
+# Central model policy (§14 #23): which model a `(project, kind)` runs on, so the
+# choice lives in ONE place instead of in every producer's config. Keyed by the
+# pair rather than by project alone so two tasks in one project can differ
+# (`training.analyze` vs `series_classify`). `kind` stays a domain label the
+# worker never interprets (§14 #1) — it is a lookup key here, not dispatch.
+_MODEL_POLICY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS model_policy (
+    project    TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project, kind)
+);
+"""
+
+_SCHEMA = _JOBS_SCHEMA + _WORKER_POLICY_SCHEMA + _MODEL_POLICY_SCHEMA
 
 # Columns `worker_policy` is expected to have. `CREATE TABLE IF NOT EXISTS` is a
 # no-op against an existing table with a DIFFERENT shape, so a renamed column
@@ -159,6 +174,20 @@ class ProjectDayCost:
     project: str
     day: str
     cost_usd: float
+
+
+@dataclass(frozen=True)
+class ModelPolicy:
+    """Which model a `(project, kind)` currently runs on (§14 #23).
+
+    `updated_at` is carried so an operator can see when the choice last changed —
+    the same reason `PublishedWorkerPolicy` carries one.
+    """
+
+    project: str
+    kind: str
+    model: str
+    updated_at: datetime
 
 
 @dataclass(frozen=True)
@@ -393,6 +422,59 @@ class Store:
             retry_budget_s=float(row["retry_budget_s"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
+
+    async def set_model_policy(
+        self, project: str, kind: str, model: str, updated_at: datetime | None = None
+    ) -> None:
+        """Point `(project, kind)` at `model`, replacing any previous choice.
+
+        Upsert, so the table describes the choice in force *now* rather than the
+        first one ever made — the same reason `publish_worker_policy` upserts.
+        `updated_at` is injectable so tests assert an exact value instead of
+        racing the clock; production passes nothing and gets now.
+        """
+        stamp = updated_at or datetime.now(timezone.utc)
+        await self._conn.execute(
+            """
+            INSERT INTO model_policy (project, kind, model, updated_at)
+                 VALUES (?, ?, ?, ?)
+            ON CONFLICT(project, kind) DO UPDATE SET
+                 model = excluded.model, updated_at = excluded.updated_at
+            """,
+            (project, kind, model, stamp.isoformat()),
+        )
+        await self._conn.commit()
+
+    async def model_policy(self, project: str, kind: str) -> ModelPolicy | None:
+        """The model chosen for `(project, kind)`, or `None` when unset.
+
+        `None` is not an error here — it is the caller's decision what absence
+        means. `resolve_model` (schema.py) turns it into a hard failure at submit
+        (§14 #23); a UI listing policies just shows nothing for that pair.
+        """
+        cursor = await self._conn.execute(
+            "SELECT project, kind, model, updated_at FROM model_policy "
+            "WHERE project = ? AND kind = ?",
+            (project, kind),
+        )
+        row = await cursor.fetchone()
+        return None if row is None else _row_to_model_policy(row)
+
+    async def list_model_policies(self) -> list[ModelPolicy]:
+        """Every policy row, ordered by project then kind (for the policy page)."""
+        cursor = await self._conn.execute(
+            "SELECT project, kind, model, updated_at FROM model_policy ORDER BY project, kind"
+        )
+        return [_row_to_model_policy(row) for row in await cursor.fetchall()]
+
+
+def _row_to_model_policy(row: aiosqlite.Row) -> ModelPolicy:
+    return ModelPolicy(
+        project=row["project"],
+        kind=row["kind"],
+        model=row["model"],
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
 
 
 def _row_to_stored_job(row: aiosqlite.Row) -> StoredJob:

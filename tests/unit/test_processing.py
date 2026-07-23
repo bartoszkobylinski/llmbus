@@ -18,6 +18,7 @@ from llmbus.processing import (
     CALLBACK_SIGNATURE_HEADER,
     WorkerDeps,
     _default_apply_timeout,
+    _model_of,
     callback_headers,
     callback_signature,
     estimate_tokens,
@@ -28,7 +29,7 @@ from llmbus.processing import (
 )
 from llmbus.providers.base import ProviderResult
 from llmbus.retry import RetryPolicy, WorkerPolicy
-from llmbus.schema import Job, JobParams, Message, Result, Usage
+from llmbus.schema import Job, JobParams, Message, ModelPolicyError, Result, Usage
 from llmbus.store import Store
 
 # --- fakes -------------------------------------------------------------------
@@ -866,3 +867,71 @@ def test_the_default_clock_is_timezone_aware_utc():
     stamped = _utcnow()
     assert stamped.tzinfo is timezone.utc
     assert abs((datetime.now(timezone.utc) - stamped).total_seconds()) < 5
+
+
+# --- a job that reached the worker with no model (§14 #23) -------------------
+
+
+async def test_process_job_with_no_model_is_an_error_result_not_a_crash():
+    # Unreachable through BusClient.submit, which resolves policy before sending.
+    # Reachable only by a job placed on the topic some other way — and one bad
+    # job must never stall the consume loop.
+    #
+    # No insert_pending here: `jobs.model` is NOT NULL, so the store physically
+    # cannot hold a model-less job. That is the invariant working at a second
+    # layer, and it is why this job has no row to finalize.
+    async with Store(":memory:") as store:
+        job = make_job(model=None)
+        provider = FakeProvider("openai", [ok_result()])
+        deps = build_deps(store, provider)
+
+        result = await process_job(deps, job)
+
+        assert result.status == "error"
+        assert result.error == "job has no model and none was resolved at submit"
+        # Never reached the provider, so nothing was paid for.
+        assert provider.calls == []
+
+
+async def test_process_job_with_no_model_never_calls_back():
+    # finalize() finds no pending row, so it does not win, so no callback fires —
+    # a producer must not receive a verdict for a job that never ran.
+    async with Store(":memory:") as store:
+        job = make_job(model=None, callback_url="http://localhost:9/internal/classified")
+        deps = build_deps(store, FakeProvider("openai", [ok_result()]))
+
+        await process_job(deps, job)
+
+        assert deps.deliver_callback.deliveries == []
+
+
+def test_model_of_states_the_worker_invariant_and_fails_loud():
+    # Defence in depth behind process_job's guard: if a future refactor ever
+    # routed a model-less job past that check, this raises rather than handing
+    # `None` to a provider. An `assert` would have vanished under `python -O`.
+    with pytest.raises(ModelPolicyError, match="reached the worker with no model"):
+        _model_of(make_job(model=None))
+
+
+def test_model_of_returns_the_model_when_one_is_set():
+    assert _model_of(make_job(model="gpt-5-nano")) == "gpt-5-nano"
+
+
+async def test_a_model_less_message_for_an_already_pending_job_finalizes_and_calls_back():
+    # The store row exists (a proper submit created it), then a malformed copy of
+    # the same job_id arrives off the topic. finalize therefore WINS here, unlike
+    # the no-row case above — so the producer is told the job failed instead of
+    # polling until its own timeout.
+    async with Store(":memory:") as store:
+        submitted = make_job(model="gpt-5-nano", callback_url="http://localhost:9/cb")
+        await store.insert_pending(submitted)
+        malformed = make_job(
+            job_id=submitted.job_id, model=None, callback_url="http://localhost:9/cb"
+        )
+        deps = build_deps(store, FakeProvider("openai", [ok_result()]))
+
+        result = await process_job(deps, malformed)
+
+        assert result.status == "error"
+        assert (await store.get(submitted.job_id)).status == "error"
+        assert len(deps.deliver_callback.deliveries) == 1

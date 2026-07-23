@@ -35,7 +35,7 @@ from llmbus.cost import cost_usd
 from llmbus.providers.base import Provider, ProviderResult, UnknownModelError, provider_for
 from llmbus.ratelimit import RateLimiter
 from llmbus.retry import WorkerPolicy, backoff_delay, is_retryable
-from llmbus.schema import Job, Result, Usage
+from llmbus.schema import Job, ModelPolicyError, Result, Usage
 from llmbus.store import Store
 
 _log = logging.getLogger("llmbus.worker")
@@ -169,6 +169,23 @@ def result_error(job: Job, provider_name: str | None, error: str) -> Result:
     )
 
 
+def _model_of(job: Job) -> str:
+    """The job's concrete model, or fail loud.
+
+    `Job.model` is optional in the contract (§14 #23) because a producer may leave
+    the choice to the bus — but `BusClient.submit` resolves it *before* the store
+    write and the Iggy send, so by the time a worker sees a job it is always set.
+    Stating that invariant in one place beats threading a narrowed string through
+    every helper, and beats an `assert`, which would vanish under `python -O`.
+
+    `process_job` checks the same thing first and turns it into an error `Result`,
+    so in practice this never raises; it exists so the type checker can see why.
+    """
+    if job.model is None:
+        raise ModelPolicyError(f"job {job.job_id} reached the worker with no model")
+    return job.model
+
+
 def _price(job: Job, call: ProviderResult) -> float:
     """USD cost of a successful call at the rate in force on the job's date (§6).
 
@@ -176,7 +193,7 @@ def _price(job: Job, call: ProviderResult) -> float:
     boundary — exactly where the ledger stops needing exact arithmetic.
     """
     cost = cost_usd(
-        job.model, call.usage.input_tokens, call.usage.output_tokens, job.submitted_at.date()
+        _model_of(job), call.usage.input_tokens, call.usage.output_tokens, job.submitted_at.date()
     )
     return float(cost)
 
@@ -210,7 +227,7 @@ async def _call_with_retry(deps: WorkerDeps, job: Job, provider: Provider, estim
             return _expired_result(job, provider.name, attempt)
         try:
             call = await deps.apply_timeout(
-                provider.call(job.model, job.messages, job.params),
+                provider.call(_model_of(job), job.messages, job.params),
                 deps.policy.job_timeout_s,
             )
         except Exception as exc:  # noqa: BLE001 - classify ANY provider/SDK failure, then decide retry vs terminal
@@ -275,6 +292,14 @@ async def process_job(deps: WorkerDeps, job: Job) -> Result:
     unknown model or an unwired provider becomes an error `Result` so one bad job
     never stalls the loop.
     """
+    if job.model is None:
+        # Unreachable via `BusClient.submit`, which resolves the policy before the
+        # store write and the Iggy send (§14 #23). Reachable only by a job put on
+        # the topic some other way, so it is an error Result rather than a crash:
+        # one malformed job must never stall the loop.
+        return await _finalize_and_notify(
+            deps, job, result_error(job, None, "job has no model and none was resolved at submit")
+        )
     try:
         provider_name = provider_for(job.model)
     except UnknownModelError:
@@ -289,6 +314,11 @@ async def process_job(deps: WorkerDeps, job: Job) -> Result:
             result = await _call_with_retry(
                 deps, job, provider, estimate_tokens(job, deps.policy.default_output_tokens)
             )
+    return await _finalize_and_notify(deps, job, result)
+
+
+async def _finalize_and_notify(deps: WorkerDeps, job: Job, result: Result) -> Result:
+    """Finalize one-shot, then fire the callback only if *this* delivery won."""
     finalized = await deps.store.finalize(result)
     if finalized and job.callback_url is not None:
         await _deliver(deps, job.callback_url, result)

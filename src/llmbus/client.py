@@ -33,7 +33,7 @@ from apache_iggy import IggyClient, SendMessage
 
 from llmbus.config import Config, iggy_connection_string, load_config
 from llmbus.providers.base import provider_for
-from llmbus.schema import Job, Result
+from llmbus.schema import Job, Result, resolve_model
 from llmbus.store import PublishedWorkerPolicy, Store, StoredJob
 from llmbus.worker import DEFAULT_TOPOLOGY, Topology, ensure_topology
 
@@ -223,13 +223,31 @@ class BusClient:
         resolve the *same* routing table from the same install (§14 #3), so this can
         never reject a model the worker would have served.
         """
-        provider_for(job.model)
-        await self._store.insert_pending(job)
-        await send_job(self._iggy, job, self._topology)
+        model = await self._resolve_model_name(job)
+        resolved = job.model_copy(update={"model": model})
+        provider_for(model)
+        await self._store.insert_pending(resolved)
+        await send_job(self._iggy, resolved, self._topology)
         _log.debug(
-            "submitted job %s to %s/%s", job.job_id, self._topology.stream, self._topology.topic
+            "submitted job %s to %s/%s",
+            resolved.job_id,
+            self._topology.stream,
+            self._topology.topic,
         )
-        return job.job_id
+        return resolved.job_id
+
+    async def _resolve_model_name(self, job: Job) -> str:
+        """The concrete model for `job`, from the central policy when unset (§14 #23).
+
+        Reads `model_policy` only when it has to — a job that names its own model
+        costs no extra query. Runs before the store write and the Iggy send, so
+        everything downstream sees a concrete model and nothing else in the bus
+        has to know that "let the bus decide" was ever an option.
+        """
+        if job.model is not None:
+            return job.model
+        policy = await self._store.model_policy(job.project, job.kind)
+        return resolve_model(job, policy.model if policy else None)
 
     async def await_result(
         self,
