@@ -33,6 +33,9 @@ worker = [
 # LLM SDKs, no API keys — so it installs and runs from the base package.
 [project.scripts]
 llmbus-costs = "llmbus.cli:main"
+# Same page, served over HTTP instead of written to a file — for milamber's
+# projects module, which links to a port on the tailnet (§11). Stdlib only.
+llmbus-costs-serve = "llmbus.server:main"
 
 [dependency-groups]
 dev = [
@@ -141,9 +144,10 @@ also_copy = [
     "src/llmbus/store.py",
     "src/llmbus/worker.py",
     "src/llmbus/client.py",
-    # The report's I/O shell (argparse, asyncio.run, file write). Not mutated,
-    # but tests/unit/test_cli.py imports it, so the sandbox needs the file.
+    # The report's I/O shells (argparse, asyncio.run, file write, sockets). Not
+    # mutated, but their unit tests import them, so the sandbox needs the files.
     "src/llmbus/cli.py",
+    "src/llmbus/server.py",
     # Same reason, one directory up: deploy/smoke.py is a deploy script, never
     # mutated, but tests/unit/test_deploy_smoke.py loads it by path (it is not an
     # importable package), so the sandbox needs the file or collection errors out.

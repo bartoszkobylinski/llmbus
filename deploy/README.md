@@ -133,6 +133,55 @@ scp bartek@izabela213:/tmp/llmbus-costs.html ~/Downloads/ && open ~/Downloads/ll
 A missing store is a hard error (exit 2), not an empty page — a typo'd path must not read
 as "$0.00 spent". An *empty* store renders a page that says so explicitly.
 
+## 5. Serving the ledger on the tailnet (for milamber's projects module)
+
+`llmbus-costs-serve` serves the same page over HTTP, re-rendered per request. This is what
+milamber's projects module links to.
+
+**The page has no authentication — the tailnet is the access control.** That is why the
+bind list must never include `0.0.0.0`.
+
+Add to `.env`:
+
+```bash
+COSTS_BIND_HOSTS=127.0.0.1,100.124.41.86
+COSTS_PORT=8093
+```
+
+Both addresses are load-bearing and it is not redundancy:
+
+- `127.0.0.1` — milamber decides a card is "online" with `socket.create_connection(
+  ("127.0.0.1", port))` (`api/routers/projects.py`). Without loopback the card shows a
+  permanent false "Offline" (this is why `capcycle-web`, which binds only the tailnet IP,
+  cannot show green).
+- `100.124.41.86` — the card's link opens `http://<the host you are browsing milamber
+  on>:<port>` (`api/templates/projects.html`). milamber does **not** proxy; the browser
+  connects here directly.
+
+Install and start:
+
+```bash
+cd ~/Projects/llmbus && git pull && ~/.local/bin/uv sync
+sudo cp deploy/llmbus-costs.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now llmbus-costs
+systemctl status llmbus-costs --no-pager
+journalctl -u llmbus-costs -n 30 --no-pager   # healthy: "serving … on 127.0.0.1:8093, 100.124.41.86:8093"
+```
+
+Verify both paths the way milamber will:
+
+```bash
+curl -s -o /dev/null -w "loopback=%{http_code}\n" http://127.0.0.1:8093/
+curl -s -o /dev/null -w "tailnet=%{http_code}\n"  http://100.124.41.86:8093/
+```
+
+Then register it in milamber (Projects → Add, or via the API) with **name** `llmbus`,
+**port** `8093`. The card's link then opens the ledger in a new tab.
+
+The unit is ordered `After=tailscaled.service` on purpose: `COSTS_BIND_HOSTS` names a
+literal tailnet address, and binding it before `tailscale0` has that address fails with
+`EADDRNOTAVAIL` — the same trap documented for `sites-enabled/nmed` and `capcycle-web`.
+
 ## Redeploys
 
 - **Worker** (after a merge to main): `bash ~/Projects/llmbus/deploy/deploy.sh`

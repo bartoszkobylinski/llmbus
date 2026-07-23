@@ -47,6 +47,7 @@ docker compose up -d                     # local Iggy for dev/integration tests
 uv run pytest -m "not integration"       # fast suite (no server needed)
 uv run pytest                            # full suite (requires local Iggy)
 uv run llmbus-costs --output costs.html  # cost ledger → standalone HTML (§11)
+uv run llmbus-costs-serve                # same page over HTTP (tailnet, no auth)
 uv run mutmut run                        # mutation testing (scoped, see below)
 uv run mypy                              # static type gate (strict, src/ only)
 uv run ruff check . && uv run ruff format --check .
@@ -65,6 +66,7 @@ src/llmbus/
   store.py       # SQLite results
   dashboard.py   # cost ledger → HTML (pure: rows in, string out)
   cli.py         # `llmbus-costs` entrypoint (I/O shell around dashboard.py)
+  server.py      # `llmbus-costs-serve` — same page over HTTP (stdlib only)
   config.py
 tests/
   unit/          # pure logic, no network, no Iggy

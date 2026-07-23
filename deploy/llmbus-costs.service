@@ -1,0 +1,47 @@
+# llmbus cost ledger over HTTP (ARCHITECTURE.md §11) — read-only page for the
+# tailnet, linked from milamber's projects module.
+# Install:  sudo cp deploy/llmbus-costs.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now llmbus-costs
+#
+# Reads only the SQLite store — no Iggy, no provider SDKs, no API keys — so it is
+# independent of the worker and of the broker, and runs fine while both are down.
+[Unit]
+Description=llmbus cost ledger — read-only HTTP page (tailnet only)
+Wants=network-online.target
+# MUST start after tailscaled. COSTS_BIND_HOSTS names a literal tailnet address,
+# and binding one before tailscale0 has it fails with EADDRNOTAVAIL. This is the
+# same trap documented for `sites-enabled/nmed` and `capcycle-web`; ordering here
+# plus Restart=on-failure below is what keeps a cold boot from leaving it down.
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=bartek
+Group=bartek
+WorkingDirectory=/home/bartek/Projects/llmbus
+# Supplies STORE_PATH, COSTS_BIND_HOSTS and COSTS_PORT (§10). Keep the file 0600.
+EnvironmentFile=/home/bartek/Projects/llmbus/.env
+# The base venv is enough: the report imports neither the LLM SDKs nor httpx, and
+# the server is standard library only. NOT `uv run` — same reason as the worker
+# unit: it would re-sync and drop the worker's extras.
+ExecStart=/home/bartek/Projects/llmbus/.venv/bin/python -m llmbus.server
+KillSignal=SIGTERM
+TimeoutStopSec=10
+# on-failure, not always: a bad COSTS_PORT or a missing store exits 2 deliberately
+# (fail-loud, §11), and restarting that forever would just hide the misconfiguration
+# in a restart loop. A lost tailnet address, by contrast, is worth retrying.
+Restart=on-failure
+RestartSec=5
+
+# The page has no authentication — the tailnet is the access control. Modest
+# hardening only: `ProtectSystem=full` leaves /home alone, which matters because
+# this process opens the store read-WRITE despite only reporting (Store.connect
+# runs idempotent `CREATE TABLE IF NOT EXISTS` and SQLite needs to write the WAL
+# sidecar). `strict` + `ProtectHome` would break it in a way that reads as a code
+# bug rather than a unit-file one.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

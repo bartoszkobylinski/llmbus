@@ -206,6 +206,60 @@ def load_store_path(env: Mapping[str, str] | None = None) -> str:
     return parse_store_path(env)
 
 
+_DEFAULT_COSTS_HOST = "127.0.0.1"
+_DEFAULT_COSTS_PORT = 8093
+
+
+@dataclass(frozen=True)
+class CostsBind:
+    """Where the cost report server listens (§11).
+
+    Plural `hosts` is the whole point. milamber's projects module decides a card
+    is "online" by opening a TCP connection to `127.0.0.1:<port>`, while the link
+    it renders points at whatever host the browser is already on — the tailnet
+    address. One socket cannot satisfy both without also binding the public
+    interface, so the server binds each host in `hosts` separately.
+    """
+
+    hosts: tuple[str, ...]
+    port: int
+
+
+def parse_costs_bind(env: Mapping[str, str]) -> CostsBind:
+    """Parse `COSTS_BIND_HOSTS` / `COSTS_PORT`, both optional with defaults.
+
+    Hosts are comma-separated and de-duplicated in order — binding the same
+    address twice on one port is `EADDRINUSE`, so a repeated entry in `.env` must
+    not take the service down. Defaults to loopback only: a host that has not
+    said which interface to expose gets the private one.
+    """
+    raw_hosts = env.get("COSTS_BIND_HOSTS", "")
+    hosts = tuple(dict.fromkeys(part.strip() for part in raw_hosts.split(",") if part.strip()))
+    return CostsBind(hosts or (_DEFAULT_COSTS_HOST,), _costs_port(env))
+
+
+def _costs_port(env: Mapping[str, str]) -> int:
+    """Parse `COSTS_PORT`, defaulting when unset; reject anything unbindable."""
+    raw = env.get("COSTS_PORT", "").strip()
+    if not raw:
+        return _DEFAULT_COSTS_PORT
+    try:
+        port = int(raw)
+    except ValueError:
+        raise ConfigError(f"setting COSTS_PORT must be an integer, got {raw!r}") from None
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"setting COSTS_PORT must be a valid port, got {port!r}")
+    return port
+
+
+def load_costs_bind(env: Mapping[str, str] | None = None) -> CostsBind:
+    """`parse_costs_bind` over `.env` + `os.environ`, or an injected mapping (tests)."""
+    if env is None:
+        load_dotenv()
+        env = os.environ
+    return parse_costs_bind(env)
+
+
 def parse_worker_policy(env: Mapping[str, str]) -> WorkerPolicy:
     """Parse the worker's retry/timeout/token policy from an environment mapping.
 

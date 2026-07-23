@@ -334,6 +334,26 @@ Ustalenia potwierdzone na maszynie (2026-07-14, nadal aktualne):
   i zostawiła pusty plik DB. Raport czyta **wyłącznie** SQLite (`config.parse_store_path` —
   bez kluczy API i bez Iggy), więc chodzi też przy leżącym workerze, a WAL (§9b) gwarantuje,
   że czytelnik nie blokuje pisarza.
+- **Widok kosztu przez HTTP (impl., PR `cost-dashboard`):** `llmbus-costs-serve` — ta sama
+  strona, renderowana **na każde żądanie** zamiast zapisywana raz do pliku, po to żeby
+  wpiąć ją w moduł `projects` milambera. Ten moduł jest **rejestrem, nie proxy**
+  (`api/routers/projects.py`, `api/templates/projects.html`): trzyma `{name, port,
+  description}`, zapala „online" wyłącznie na podstawie `socket.create_connection(
+  ("127.0.0.1", port))`, a link otwiera `http://<host, na którym oglądasz milambera>:<port>`.
+  Nic tam nie przekazuje ruchu, więc to llmbus musi słuchać na tailnecie.
+  **Dlatego serwer binduje WIĘCEJ NIŻ JEDEN adres** (`COSTS_BIND_HOSTS`, domyślnie sam
+  loopback): health-check chce `127.0.0.1`, przeglądarka chce adresu tailnetu. `0.0.0.0`
+  spełnia oba, ale wystawia koszt per projekt na **publiczny** interfejs bez auth; sam
+  adres tailnetu (wzorzec `capcycle-web`) zostawia kartę na wiecznym, fałszywym „Offline".
+  Dwa gniazda w jednym procesie dają oba, nie dają publicznego i **nie wymagają vhosta
+  nginx** — czyli omijają pułapki 443/tailscaled z runbooka. Serwer to **wyłącznie
+  stdlib** (`http.server`); wciąganie FastAPI/uvicorn do *busa* dla jednej strony to
+  dokładnie ten scope creep, przed którym stoi §1. `asyncio.run` na żądanie jest legalne,
+  bo każde żądanie leci na własnym wątku (bez działającej pętli) — ten sam most „na
+  własnej krawędzi" co `cli.py` (§14 #17).
+  **Strona nie ma uwierzytelniania — to jest świadome i dlatego domyślny bind to loopback:**
+  granicą dostępu jest sieć (ta sama postawa „Phase 0", którą runbook zapisuje dla
+  `capcycle-web`). Nie poszerzać bindu do `0.0.0.0` bez dołożenia auth.
 - **Polityka workera (impl., PR `worker-policy-publish`, §14 #21):** tabela `worker_policy`
   (jeden wiersz, `id=1`, upsert przy każdym boocie workera **przed** rozpoczęciem konsumpcji)
   niesie `max_attempts`/`job_timeout_s`/`base_delay_s`/`max_delay_s`, wyliczony

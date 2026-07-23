@@ -11,14 +11,17 @@ from llmbus import config
 from llmbus.config import (
     Config,
     ConfigError,
+    CostsBind,
     _positive_float,
     _provider_limits,
     _require,
     build_providers,
     iggy_connection_string,
     load_config,
+    load_costs_bind,
     load_store_path,
     parse_config,
+    parse_costs_bind,
     parse_store_path,
 )
 from llmbus.providers.anthropic import AnthropicAdapter
@@ -296,6 +299,78 @@ def test_parse_store_path_rejects_a_blank_path():
 def test_load_store_path_bypasses_dotenv_when_env_is_injected(monkeypatch):
     monkeypatch.setattr(config, "load_dotenv", _fail_if_called)
     assert load_store_path(_ENV) == "llmbus.db"
+
+
+# --- parse_costs_bind (where the report server listens, §11) -----------------
+
+
+def test_costs_bind_defaults_to_loopback_only():
+    # A host that has not said which interface to expose gets the private one.
+    assert parse_costs_bind({}) == CostsBind(("127.0.0.1",), 8093)
+
+
+def test_costs_bind_reads_a_comma_separated_host_list():
+    bind = parse_costs_bind({"COSTS_BIND_HOSTS": "127.0.0.1,100.124.41.86"})
+    assert bind.hosts == ("127.0.0.1", "100.124.41.86")
+
+
+def test_costs_bind_strips_whitespace_around_hosts():
+    bind = parse_costs_bind({"COSTS_BIND_HOSTS": " 127.0.0.1 , 100.124.41.86 "})
+    assert bind.hosts == ("127.0.0.1", "100.124.41.86")
+
+
+def test_costs_bind_drops_empty_entries_from_a_trailing_comma():
+    assert parse_costs_bind({"COSTS_BIND_HOSTS": "127.0.0.1,"}).hosts == ("127.0.0.1",)
+
+
+def test_costs_bind_deduplicates_hosts_preserving_order():
+    # Binding the same address twice on one port is EADDRINUSE — a duplicated
+    # entry in .env must not take the service down on boot.
+    bind = parse_costs_bind({"COSTS_BIND_HOSTS": "100.124.41.86,127.0.0.1,100.124.41.86"})
+    assert bind.hosts == ("100.124.41.86", "127.0.0.1")
+
+
+def test_costs_bind_falls_back_to_loopback_when_the_list_is_blank():
+    assert parse_costs_bind({"COSTS_BIND_HOSTS": "  ,  "}).hosts == ("127.0.0.1",)
+
+
+def test_costs_bind_reads_an_explicit_port():
+    assert parse_costs_bind({"COSTS_PORT": "9000"}).port == 9000
+
+
+@pytest.mark.parametrize("port", ["0", "70000", "-1"])
+def test_costs_bind_rejects_a_port_outside_the_valid_range(port):
+    with pytest.raises(ConfigError, match="must be a valid port"):
+        parse_costs_bind({"COSTS_PORT": port})
+
+
+def test_costs_bind_rejects_a_non_numeric_port():
+    with pytest.raises(ConfigError, match="must be an integer"):
+        parse_costs_bind({"COSTS_PORT": "eight-thousand"})
+
+
+@pytest.mark.parametrize("port", ["1", "65535"])
+def test_costs_bind_accepts_the_range_boundaries(port):
+    assert parse_costs_bind({"COSTS_PORT": port}).port == int(port)
+
+
+def test_load_costs_bind_bypasses_dotenv_when_env_is_injected(monkeypatch):
+    monkeypatch.setattr(config, "load_dotenv", _fail_if_called)
+    assert load_costs_bind({"COSTS_PORT": "8093"}) == CostsBind(("127.0.0.1",), 8093)
+
+
+def test_load_costs_bind_reads_dotenv_then_environ_by_default(monkeypatch):
+    loaded = {"called": False}
+
+    def _fake_load_dotenv():
+        loaded["called"] = True
+
+    monkeypatch.setattr(config, "load_dotenv", _fake_load_dotenv)
+    monkeypatch.setenv("COSTS_BIND_HOSTS", "127.0.0.1,100.124.41.86")
+    monkeypatch.setenv("COSTS_PORT", "8093")
+
+    assert load_costs_bind() == CostsBind(("127.0.0.1", "100.124.41.86"), 8093)
+    assert loaded["called"] is True
 
 
 def test_load_store_path_reads_dotenv_then_environ_by_default(monkeypatch):
