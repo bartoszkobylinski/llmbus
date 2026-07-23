@@ -112,6 +112,27 @@ A freshly-deployed worker with no producer sending jobs just sits connected and 
 that's the correct "up" state. Jobs flow once `hate-moderator` calls `bus.submit(...)`
 (a separate change in that repo; §8, and §14 #3 for how it imports `llmbus`).
 
+## 4. Reading the cost ledger
+
+`llmbus-costs` renders spend per project and day to a standalone HTML file. It reads only
+the SQLite store — no Iggy, no API keys — so it is safe to run while the worker is up
+(WAL: this reader never blocks that writer) *and* while it is down.
+
+```bash
+cd ~/Projects/llmbus && ~/.local/bin/uv run llmbus-costs --output /tmp/llmbus-costs.html
+```
+
+It picks up `STORE_PATH` from `.env`; pass `--store-path` to point it elsewhere. The page
+is self-contained (inline CSS, no scripts, no fonts, no network), so pull it down and open
+it locally:
+
+```bash
+scp bartek@izabela213:/tmp/llmbus-costs.html ~/Downloads/ && open ~/Downloads/llmbus-costs.html
+```
+
+A missing store is a hard error (exit 2), not an empty page — a typo'd path must not read
+as "$0.00 spent". An *empty* store renders a page that says so explicitly.
+
 ## Redeploys
 
 - **Worker** (after a merge to main): `bash ~/Projects/llmbus/deploy/deploy.sh`

@@ -46,6 +46,7 @@ uv sync                                  # deps
 docker compose up -d                     # local Iggy for dev/integration tests
 uv run pytest -m "not integration"       # fast suite (no server needed)
 uv run pytest                            # full suite (requires local Iggy)
+uv run llmbus-costs --output costs.html  # cost ledger → standalone HTML (§11)
 uv run mutmut run                        # mutation testing (scoped, see below)
 uv run mypy                              # static type gate (strict, src/ only)
 uv run ruff check . && uv run ruff format --check .
@@ -62,6 +63,8 @@ src/llmbus/
   ratelimit.py   # token-bucket per provider
   cost.py        # usage → USD, per project
   store.py       # SQLite results
+  dashboard.py   # cost ledger → HTML (pure: rows in, string out)
+  cli.py         # `llmbus-costs` entrypoint (I/O shell around dashboard.py)
   config.py
 tests/
   unit/          # pure logic, no network, no Iggy
@@ -97,7 +100,7 @@ every one is green.
   the ruff `tests/** = ANN` ignore. The package ships a PEP 561 `py.typed` marker, so repos
   importing `llmbus` type-check against it too.
 - **Mutation testing (`mutmut`):** scoped to pure-logic modules only —
-  `schema.py`, `ratelimit.py`, `cost.py`, `providers/base.py`, routing logic.
+  `schema.py`, `ratelimit.py`, `cost.py`, `providers/base.py`, `dashboard.py`, routing logic.
   Never run mutations over integration-touching code (worker loop, store I/O, client) —
   each mutant would need a live server and the run explodes. Goal: **0 surviving mutants**
   in scoped modules before a feature branch is merge-ready.

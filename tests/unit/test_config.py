@@ -17,7 +17,9 @@ from llmbus.config import (
     build_providers,
     iggy_connection_string,
     load_config,
+    load_store_path,
     parse_config,
+    parse_store_path,
 )
 from llmbus.providers.anthropic import AnthropicAdapter
 from llmbus.providers.base import PROVIDERS, Provider
@@ -266,6 +268,47 @@ def test_load_config_reads_dotenv_then_environ_by_default(monkeypatch):
 
 def _fail_if_called():
     raise AssertionError("load_dotenv must not run when env is injected")
+
+
+# --- parse_store_path / load_store_path (the read-only report's seam) ---------
+
+
+def test_parse_store_path_returns_the_configured_path():
+    assert parse_store_path(_ENV) == "llmbus.db"
+
+
+def test_parse_store_path_needs_no_api_keys_or_iggy_credentials():
+    # The whole point of the narrow parse: a read-only cost report must run on a
+    # host that holds no secrets. Only STORE_PATH is present here.
+    assert parse_store_path({"STORE_PATH": "/srv/llmbus.db"}) == "/srv/llmbus.db"
+
+
+def test_parse_store_path_rejects_a_missing_path():
+    with pytest.raises(ConfigError, match="missing required setting STORE_PATH"):
+        parse_store_path({})
+
+
+def test_parse_store_path_rejects_a_blank_path():
+    with pytest.raises(ConfigError, match="missing required setting STORE_PATH"):
+        parse_store_path({"STORE_PATH": "   "})
+
+
+def test_load_store_path_bypasses_dotenv_when_env_is_injected(monkeypatch):
+    monkeypatch.setattr(config, "load_dotenv", _fail_if_called)
+    assert load_store_path(_ENV) == "llmbus.db"
+
+
+def test_load_store_path_reads_dotenv_then_environ_by_default(monkeypatch):
+    loaded = {"called": False}
+
+    def _fake_load_dotenv():
+        loaded["called"] = True
+
+    monkeypatch.setattr(config, "load_dotenv", _fake_load_dotenv)
+    monkeypatch.setenv("STORE_PATH", "/from/environ.db")
+
+    assert load_store_path() == "/from/environ.db"
+    assert loaded["called"] is True
 
 
 # --- build_providers ---------------------------------------------------------

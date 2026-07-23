@@ -186,6 +186,26 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     return parse_config(env)
 
 
+def parse_store_path(env: Mapping[str, str]) -> str:
+    """Parse just `STORE_PATH` — the one setting a read-only reader needs.
+
+    Parsed separately from `Config` for the same reason as `parse_worker_policy`:
+    the caller's role decides which keys it must supply. The cost report (`cli.py`)
+    only ever reads the SQLite file, so demanding `parse_config`'s full set would
+    make a read-only view fail on a host with no API keys or Iggy credentials —
+    turning "show me the ledger" into a reason to put secrets somewhere.
+    """
+    return _require(env, "STORE_PATH")
+
+
+def load_store_path(env: Mapping[str, str] | None = None) -> str:
+    """`parse_store_path` over `.env` + `os.environ`, or an injected mapping (tests)."""
+    if env is None:
+        load_dotenv()
+        env = os.environ
+    return parse_store_path(env)
+
+
 def parse_worker_policy(env: Mapping[str, str]) -> WorkerPolicy:
     """Parse the worker's retry/timeout/token policy from an environment mapping.
 

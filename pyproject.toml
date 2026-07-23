@@ -29,6 +29,11 @@ worker = [
     "httpx>=0.27",
 ]
 
+# The cost-ledger HTML report (§11). Reads only the SQLite store — no Iggy, no
+# LLM SDKs, no API keys — so it installs and runs from the base package.
+[project.scripts]
+llmbus-costs = "llmbus.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -122,6 +127,10 @@ source_paths = [
     # so mutants are killed by unit tests with fakes — no live server needed.
     "src/llmbus/retry.py",
     "src/llmbus/processing.py",
+    # The cost-report view (§11): rows in, HTML string out. No SQLite, no clock,
+    # no filesystem — all of that is in cli.py — so its mutants die to plain
+    # unit tests. cli.py itself is the I/O shell and is not mutated.
+    "src/llmbus/dashboard.py",
 ]
 # config.py, store.py, worker.py and client.py are integration/I/O-touching (SDK
 # clients, SQLite, Iggy), so they are *not* mutated. But their unit tests import
@@ -132,6 +141,9 @@ also_copy = [
     "src/llmbus/store.py",
     "src/llmbus/worker.py",
     "src/llmbus/client.py",
+    # The report's I/O shell (argparse, asyncio.run, file write). Not mutated,
+    # but tests/unit/test_cli.py imports it, so the sandbox needs the file.
+    "src/llmbus/cli.py",
     # Same reason, one directory up: deploy/smoke.py is a deploy script, never
     # mutated, but tests/unit/test_deploy_smoke.py loads it by path (it is not an
     # importable package), so the sandbox needs the file or collection errors out.

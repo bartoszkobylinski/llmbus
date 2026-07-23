@@ -314,6 +314,26 @@ Ustalenia potwierdzone na maszynie (2026-07-14, nadal aktualne):
   po której `cost.py` wycenia, §6), z `HAVING SUM(cost_usd) > 0`: grupy bez realnego wydatku
   (tylko `pending`/`error`, albo darmowe completiony) są **pominięte** — księga wydatków
   pokazuje realny koszt, nie wiersze `$0.00`. To „tabela w store per projekt/dzień" z góry tej sekcji.
+- **Widok kosztu (impl., PR `cost-dashboard`):** `llmbus-costs` — CLI renderujący ten sam
+  `cost_by_project_day()` do **samodzielnego pliku HTML** (`dashboard.py` = czysta funkcja
+  `wiersze → string`, w bramce mutacyjnej; `cli.py` = powłoka I/O, jak split
+  `worker-core`/`worker-loop` z §6). Strona nie ma zależności sieciowych (inline CSS, zero
+  JS, zero fontów), więc czyta się z `file://` i przenosi `scp`. Zakres celowo mały:
+  **generator pliku, nie serwer** — bus nie dostaje portu HTTP ani powierzchni auth (§1),
+  a na VPS-ie z problemem OOM (runbook) nie przybywa procesu. Trzy rzeczy warte
+  odnotowania, bo są decyzjami, nie domyślnymi:
+  (a) **6 miejsc po przecinku wszędzie** — koszt joba jest podcentowy (smoke ≈ $0,00006),
+  więc konwencjonalne 2 miejsca renderowałyby całą księgę jako `$0.00`;
+  (b) **kwoty wracają do `Decimal`** (`Decimal(str(x))`, nie `Decimal(float)`) — store
+  oddaje `float` z SQLite `SUM`, a sumowanie floatów odtworzyłoby dokładnie ten błąd
+  akumulacji, przed którym `cost.py` broni;
+  (c) **dni to słupki, nie linia** — ledger ma `HAVING > 0`, więc dni bez wydatku są
+  *nieobecne*, nie zerowe; linia narysowałaby zbocze przez lukę, której w danych nie ma.
+  Brak pliku store'a jest **błędem twardym** (exit 2), nie pustą stroną: `Store.connect()`
+  tworzy plik i schemat, więc literówka w ścieżce dałaby pewny siebie raport `$0.000000`
+  i zostawiła pusty plik DB. Raport czyta **wyłącznie** SQLite (`config.parse_store_path` —
+  bez kluczy API i bez Iggy), więc chodzi też przy leżącym workerze, a WAL (§9b) gwarantuje,
+  że czytelnik nie blokuje pisarza.
 - **Polityka workera (impl., PR `worker-policy-publish`, §14 #21):** tabela `worker_policy`
   (jeden wiersz, `id=1`, upsert przy każdym boocie workera **przed** rozpoczęciem konsumpcji)
   niesie `max_attempts`/`job_timeout_s`/`base_delay_s`/`max_delay_s`, wyliczony
@@ -329,7 +349,14 @@ Ustalenia potwierdzone na maszynie (2026-07-14, nadal aktualne):
 Oba to potencjalna kontrybucja; obejścia (body JSON, licznik w store) wystarczą na v1.
 
 ## 13. Świadomie odłożone (v2+)
-skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowiedzi, twarde limity budżetu, milamber, OpenRouter, dashboard.
+skalowanie workerów, priorytety/fast-lane, dead-letter topic, streaming odpowiedzi, twarde limity budżetu, milamber, OpenRouter.
+
+**„dashboard" zszedł z tej listy tylko częściowo (2026-07-23).** Zbudowany jest *statyczny
+raport kosztu* — `llmbus-costs` generuje plik HTML (§11). **Nadal odłożone** jest to, co z
+tej pozycji zostało: dashboard **serwowany** (proces HTTP, auth, filtry zakresu dat,
+odświeżanie na żywo, lag/kolejka obok kosztu). To osobna decyzja niż widok kosztu — dodaje
+busowi port, powierzchnię uwierzytelniania i stały proces na boxie; nic z tego nie było
+potrzebne, żeby odpowiedzieć na pytanie „ile wydałem i na co".
 
 ## 14. Otwarte decyzje (do rozstrzygnięcia)
 1. ~~Worker **generyczny + callback** vs **domenowy**.~~ **ROZSTRZYGNIĘTE —
