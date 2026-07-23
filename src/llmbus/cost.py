@@ -62,6 +62,16 @@ PRICING: dict[str, tuple[PricePoint, ...]] = {
     # pins in its own config (`config.py:30-31`) — two sources agreeing, not one
     # copied twice. Evidence: `notes/model-pricing-openai.md`.
     "gpt-5.4-mini": (PricePoint(_EPOCH, ModelPricing(Decimal("0.75"), Decimal("4.50"))),),
+    # milamber's routed models (§14 #23 step 2). Rates verified 2026-07-23 against
+    # OpenAI's published pricing AND independently equal to the rates milamber
+    # pins in `parser/openai_parser.py:28-30` — two sources agreeing, not one
+    # copied twice. Evidence: `notes/model-pricing-openai.md` (round 2).
+    # NOTE: gpt-5.2 is NOT on the main pricing table; its price comes from the
+    # model's own docs page. A model can be live, billable and absent from that
+    # table, so never conclude "no price" from the pricing page alone.
+    "gpt-5.2": (PricePoint(_EPOCH, ModelPricing(Decimal("1.75"), Decimal("14.00"))),),
+    "gpt-5.4": (PricePoint(_EPOCH, ModelPricing(Decimal("2.50"), Decimal("15.00"))),),
+    "gpt-5.5": (PricePoint(_EPOCH, ModelPricing(Decimal("5.00"), Decimal("30.00"))),),
     # Anthropic
     "claude-opus-4-8": (PricePoint(_EPOCH, ModelPricing(Decimal("5.00"), Decimal("25.00"))),),
     "claude-haiku-4-5": (PricePoint(_EPOCH, ModelPricing(Decimal("1.00"), Decimal("5.00"))),),

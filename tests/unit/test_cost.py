@@ -27,6 +27,11 @@ _DOCUMENTED_PRICING = MappingProxyType(
         "gpt-5.4-mini": (
             PricePoint(date(2025, 1, 1), ModelPricing(Decimal("0.75"), Decimal("4.50"))),
         ),
+        # Verified 2026-07-23 against OpenAI's published pricing and independently
+        # equal to milamber's own table; receipt in notes/model-pricing-openai.md.
+        "gpt-5.2": (PricePoint(date(2025, 1, 1), ModelPricing(Decimal("1.75"), Decimal("14.00"))),),
+        "gpt-5.4": (PricePoint(date(2025, 1, 1), ModelPricing(Decimal("2.50"), Decimal("15.00"))),),
+        "gpt-5.5": (PricePoint(date(2025, 1, 1), ModelPricing(Decimal("5.00"), Decimal("30.00"))),),
         "claude-opus-4-8": (
             PricePoint(date(2025, 1, 1), ModelPricing(Decimal("5.00"), Decimal("25.00"))),
         ),
@@ -257,3 +262,29 @@ def test_price_point_is_immutable():
 def test_pricing_table_covers_both_providers():
     assert any(m.startswith("gpt-") for m in PRICING)
     assert any(m.startswith("claude-") for m in PRICING)
+
+
+# --- milamber's routed models (§14 #23 step 2, verified 2026-07-23) ----------
+
+
+@pytest.mark.parametrize(
+    ("model", "input_rate", "output_rate"),
+    [("gpt-5.2", "1.75", "14.00"), ("gpt-5.4", "2.50", "15.00"), ("gpt-5.5", "5.00", "30.00")],
+)
+def test_milamber_models_price_at_their_verified_rates(model, input_rate, output_rate):
+    # 1M in + 1M out is exactly input_rate + output_rate, so a mistyped rate in
+    # either column fails here with the wrong number rather than "roughly right".
+    expected = Decimal(input_rate) + Decimal(output_rate)
+    assert cost_usd(model, 1_000_000, 1_000_000, date(2026, 7, 23)) == expected
+
+
+def test_gpt_5_4_prices_a_realistic_training_call():
+    # api/routers/training.py:545 shape: a few thousand tokens each way.
+    # 3000 * 2.50/1e6 + 1500 * 15.00/1e6 = 0.0075 + 0.0225 = 0.03
+    assert cost_usd("gpt-5.4", 3_000, 1_500, date(2026, 7, 23)) == Decimal("0.03")
+
+
+def test_gpt_5_2_is_priced_even_though_it_is_absent_from_the_pricing_page():
+    # Its rate came from the model's own docs page, not the pricing table — a
+    # model can be live, billable and missing from that table (notes/).
+    assert cost_usd("gpt-5.2", 1_000_000, 0, date(2026, 7, 23)) == Decimal("1.75")

@@ -32,6 +32,10 @@ PROVIDERS: dict[str, str] = {
     "gpt-5-nano": "openai",
     # The hate-moderator pilot's classifier model (§14 #6).
     "gpt-5.4-mini": "openai",
+    # milamber's routed models (§14 #23 step 2); prices verified 2026-07-23.
+    "gpt-5.2": "openai",
+    "gpt-5.4": "openai",
+    "gpt-5.5": "openai",
     # Anthropic
     "claude-opus-4-8": "anthropic",
     "claude-sonnet-5": "anthropic",
@@ -57,6 +61,9 @@ CAPABILITIES: dict[str, Capability] = {
     "gpt-5-mini": "chat",
     "gpt-5-nano": "chat",
     "gpt-5.4-mini": "chat",
+    "gpt-5.2": "chat",
+    "gpt-5.4": "chat",
+    "gpt-5.5": "chat",
     "claude-opus-4-8": "chat",
     "claude-sonnet-5": "chat",
     "claude-haiku-4-5": "chat",

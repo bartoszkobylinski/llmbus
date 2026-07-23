@@ -295,3 +295,72 @@ Listed plainly. None of these gaps was filled with a plausible guess.
     call confirms it.
 12. **`gpt-5.5-pro` / `gpt-5.4-pro` cached-input rates** are shown as "—" on the pricing page.
     Whether that means "caching unsupported" or "not published" is unconfirmed.
+
+---
+
+# Round 2 — models milamber routes (research date: 2026-07-23)
+
+**Purpose:** verify prices for the models `milamber_assistant` actually calls, before adding
+them to `cost.py::PRICING` (§14 #23 step 2). Same rules as round 1: every figure carries a
+source URL and a retrieval date; nothing is interpolated from a sibling model or copied from
+milamber's own table as if it were evidence.
+
+**Why milamber's table is not evidence.** `parser/openai_parser.py:17-32` carries a
+`MODEL_PRICING` dict. It is a **second source**, useful only for *agreement* — the §14 #6
+lesson was that a number living in a consumer's config proves nothing about what the bus
+should bill. Where the two agree below, that is two independent sources; where only one
+exists, it is marked as such.
+
+**Reliability check on this round's fetch.** The pricing page reported `gpt-5.4-mini` at
+**$0.75 / $4.50** — identical to the value round 1 verified on 2026-07-20 and already in
+`cost.py`. An independent re-derivation of a known-good value, so the source behaved.
+
+## Verified and registered
+
+| Model | Input /1M | Output /1M | Sources | Retrieved |
+|---|---|---|---|---|
+| `gpt-5.4` | **$2.50** | **$15.00** | <https://developers.openai.com/api/docs/pricing> **+** milamber `openai_parser.py:29` (agrees) | 2026-07-23 |
+| `gpt-5.5` | **$5.00** | **$30.00** | <https://developers.openai.com/api/docs/pricing> **+** milamber `openai_parser.py:30` (agrees) | 2026-07-23 |
+| `gpt-5.2` | **$1.75** | **$14.00** | <https://developers.openai.com/api/docs/models/gpt-5.2> **+** milamber `openai_parser.py:28` (agrees) | 2026-07-23 |
+
+All three are `chat` capability (`providers/base.py::CAPABILITIES`).
+
+**Where each is used in milamber:** `gpt-5.4` — `api/routers/training.py:545` (`training.analyze`)
+and `:591` (`training.refine`), plus the user-facing picker `db/models/language.py:74`.
+`gpt-5.2` — `parser/openai_parser.py:366` `ESTIMATION_MODEL`. `gpt-5.5` — picker
+`db/models/language.py:75`.
+
+## Finding worth keeping: `gpt-5.2` is NOT on the pricing page
+
+The main pricing table at `developers.openai.com/api/docs/pricing` lists `gpt-5.4`,
+`gpt-5.4-mini`, `gpt-5.4-nano` and `gpt-5.5` — and **does not list `gpt-5.2` at all**
+(retrieved 2026-07-23). Its price came from the model's own docs page, which does still
+publish it.
+
+Do not read the absence as deprecation: per OpenAI's own statement, there are **no current
+plans to deprecate `gpt-5.1`, `gpt-5` or `gpt-4.1` in the API**, and deprecations get advance
+notice. But it does mean **the pricing page alone is not a sufficient source** for the older
+line — a model can be live, billable, and absent from that table. Check the per-model docs
+page before concluding a model has no price.
+
+## Verified but deliberately NOT registered
+
+| Model | Input /1M | Output /1M | Source | Why not |
+|---|---|---|---|---|
+| `gpt-5.4-nano` | $0.20 | $1.25 | <https://developers.openai.com/api/docs/pricing>, 2026-07-23 | Only reachable via milamber's admin switcher (`bot/commands/admin.py:34`); nothing routes it. Registering an unused model means maintaining a dated price for it forever. |
+
+## What I could NOT verify
+
+- **`whisper-1`** — absent from the pricing page (2026-07-23). It is not token-priced at all
+  (per-minute of audio, §14 #24), so it cannot enter `PRICING` in its current shape anyway.
+  milamber uses **$0.006/minute** (`knowledge/whisper.py:8`) — **one source only, unverified
+  here.** Must be verified before transcription billing ships.
+- **`text-embedding-3-small`** — absent from the pricing page (2026-07-23). Not needed yet
+  (embeddings stay inline, §14 #24).
+- **`gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`,
+  `gpt-5.1`, `gpt-5.5-pro`** — not fetched this round. They appear only in milamber's admin
+  switcher list (`bot/commands/admin.py:21-34`), which nothing routes today. **Live footgun:**
+  if that list stays as-is after migration, selecting one of them makes every job fail at
+  `submit()` with `UnknownModelError`. Narrow the list, or register them with verified prices.
+- `openai.com` (marketing host) returned **HTTP 403** again this round, exactly as in round 1.
+  No price in this section depends on it.
