@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -225,16 +225,52 @@ class CostsBind:
     port: int
 
 
+# Addresses that mean "every interface". The cost page ships no authentication —
+# the network boundary is the access control (§11) — so binding one of these would
+# publish per-project spend on the box's public interface. Refused rather than
+# documented-against: a comment in `.env.example` is not an enforcement mechanism.
+# `""` is included because that is exactly how the socket layer spells the IPv4
+# wildcard, so `--host ""` is `0.0.0.0` by another name.
+_WILDCARD_HOSTS = frozenset({"", "0.0.0.0", "::"})
+
+
+def validate_costs_hosts(hosts: Sequence[str]) -> tuple[str, ...]:
+    """Reject wildcard binds, then de-duplicate in order.
+
+    Shared by the `.env` path and the `--host` flag so one rule covers both — the
+    flag used to bypass the check entirely, which made the documented "never bind
+    0.0.0.0" invariant unenforced on the one path a human types by hand.
+
+    De-duplication is not cosmetic: two sockets on the same address and port is
+    `EADDRINUSE`, so a repeated host would take the service down on boot.
+    """
+    for host in hosts:
+        if host.strip() in _WILDCARD_HOSTS:
+            raise ConfigError(
+                f"cost report host {host!r} binds every interface; the page has no "
+                "authentication, so 0.0.0.0 and :: are refused (§11)"
+            )
+    return tuple(dict.fromkeys(host.strip() for host in hosts))
+
+
+def validate_costs_port(port: int) -> int:
+    """Reject a port no socket could bind. Shared by `.env` and the `--port` flag."""
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"setting COSTS_PORT must be a valid port, got {port!r}")
+    return port
+
+
 def parse_costs_bind(env: Mapping[str, str]) -> CostsBind:
     """Parse `COSTS_BIND_HOSTS` / `COSTS_PORT`, both optional with defaults.
 
-    Hosts are comma-separated and de-duplicated in order — binding the same
-    address twice on one port is `EADDRINUSE`, so a repeated entry in `.env` must
-    not take the service down. Defaults to loopback only: a host that has not
-    said which interface to expose gets the private one.
+    Hosts are comma-separated. Blank entries (a trailing comma) are dropped rather
+    than rejected — that is a typo with an obvious intent, unlike an explicit
+    `--host ""`, which asks for the wildcard and is refused. Defaults to loopback
+    only: a host that has not said which interface to expose gets the private one.
     """
     raw_hosts = env.get("COSTS_BIND_HOSTS", "")
-    hosts = tuple(dict.fromkeys(part.strip() for part in raw_hosts.split(",") if part.strip()))
+    parts = [part for part in raw_hosts.split(",") if part.strip()]
+    hosts = validate_costs_hosts(parts)
     return CostsBind(hosts or (_DEFAULT_COSTS_HOST,), _costs_port(env))
 
 
@@ -247,9 +283,7 @@ def _costs_port(env: Mapping[str, str]) -> int:
         port = int(raw)
     except ValueError:
         raise ConfigError(f"setting COSTS_PORT must be an integer, got {raw!r}") from None
-    if not 1 <= port <= 65535:
-        raise ConfigError(f"setting COSTS_PORT must be a valid port, got {port!r}")
-    return port
+    return validate_costs_port(port)
 
 
 def load_costs_bind(env: Mapping[str, str] | None = None) -> CostsBind:

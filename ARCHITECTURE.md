@@ -353,7 +353,11 @@ Ustalenia potwierdzone na maszynie (2026-07-14, nadal aktualne):
   własnej krawędzi" co `cli.py` (§14 #17).
   **Strona nie ma uwierzytelniania — to jest świadome i dlatego domyślny bind to loopback:**
   granicą dostępu jest sieć (ta sama postawa „Phase 0", którą runbook zapisuje dla
-  `capcycle-web`). Nie poszerzać bindu do `0.0.0.0` bez dołożenia auth.
+  `capcycle-web`). Nie poszerzać bindu do `0.0.0.0` bez dołożenia auth — i to jest
+  **wymuszone, nie tylko opisane**: `0.0.0.0`, `::` oraz pusty host lecą `ConfigError`
+  (exit 2) zarówno z `COSTS_BIND_HOSTS`, jak i z flagi `--host`. Review Codeksa pokazał,
+  że sam komentarz w `.env.example` nie jest mechanizmem: flaga omijała walidację `.env`,
+  a `--host ""` to dokładnie ten sam wildcard, tylko zapisany po socketowemu.
 - **Polityka workera (impl., PR `worker-policy-publish`, §14 #21):** tabela `worker_policy`
   (jeden wiersz, `id=1`, upsert przy każdym boocie workera **przed** rozpoczęciem konsumpcji)
   niesie `max_attempts`/`job_timeout_s`/`base_delay_s`/`max_delay_s`, wyliczony

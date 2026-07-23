@@ -66,15 +66,25 @@ def resolve_store_path(explicit: str | None) -> str:
 
 
 def require_existing_store(store_path: str) -> None:
-    """Fail when the store file is absent, instead of reporting an empty ledger.
+    """Fail when the store is absent or is not a file, instead of reporting empty.
 
     `Store.connect()` creates the file and schema if missing — correct for the
     worker, wrong here: a typo'd path would otherwise produce a clean, confident
     `$0.000000` page and leave a stray empty database behind. A cost view that
     silently reports zero because it read the wrong file is worse than one that
     refuses, so this checks first (§ fail-loud).
+
+    A directory is rejected separately from an absent path. `exists()` is true for
+    one, so pointing at the data *directory* rather than the file inside it used
+    to sail past this guard and fail later inside SQLite, where the error names
+    neither the setting nor the mistake.
     """
-    if store_path != ":memory:" and not Path(store_path).exists():
+    if store_path == ":memory:":
+        return
+    target = Path(store_path)
+    if target.is_dir():
+        raise ConfigError(f"store path {store_path!r} is a directory, not a SQLite file")
+    if not target.is_file():
         raise ConfigError(f"no store at {store_path!r} — nothing to report on")
 
 

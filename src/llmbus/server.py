@@ -41,7 +41,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import BaseServer
 
 from llmbus.cli import collect_summary, require_existing_store, resolve_store_path
-from llmbus.config import ConfigError, CostsBind, load_costs_bind
+from llmbus.config import (
+    ConfigError,
+    CostsBind,
+    load_costs_bind,
+    validate_costs_hosts,
+    validate_costs_port,
+)
 from llmbus.dashboard import render_dashboard
 
 # Only the ledger itself is served. No static assets, no other routes: the page
@@ -106,7 +112,19 @@ def build_servers(
     """
     server_factory = factory or ThreadingHTTPServer
     handler = make_handler(store_path)
-    return [server_factory((host, bind.port), handler) for host in bind.hosts]
+    opened: list[ThreadingHTTPServer] = []
+    try:
+        for host in bind.hosts:
+            opened.append(server_factory((host, bind.port), handler))
+    except OSError:
+        # A partial bind must not leak the sockets it did open. Failing on the
+        # second address (tailscale0 not up yet — the documented cold-boot case)
+        # would otherwise leave the first listening on a half-started service and
+        # hold the port, so systemd's restart hits EADDRINUSE and never recovers.
+        for server in opened:
+            server.server_close()
+        raise
+    return opened
 
 
 def serve_forever(servers: Sequence[BaseServer]) -> None:
@@ -155,11 +173,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def resolve_bind(hosts: Sequence[str] | None, port: int | None) -> CostsBind:
-    """CLI flags win over the environment, per field, like `resolve_store_path`."""
+    """CLI flags win over the environment, per field, like `resolve_store_path`.
+
+    Flags go through the *same* validation as `.env` rather than straight into a
+    socket: an explicit `--host 0.0.0.0` (or `--host ""`, which the socket layer
+    reads as the same wildcard) would otherwise publish the unauthenticated page
+    on the public interface, and an explicit `--port 70000` would skip the range
+    check and fail deep in `bind()` instead of at the boundary.
+    """
     configured = load_costs_bind()
     return CostsBind(
-        hosts=tuple(hosts) if hosts else configured.hosts,
-        port=port if port is not None else configured.port,
+        hosts=validate_costs_hosts(hosts) if hosts else configured.hosts,
+        port=validate_costs_port(port) if port is not None else configured.port,
     )
 
 
