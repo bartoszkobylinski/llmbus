@@ -819,6 +819,14 @@ potrzebne, żeby odpowiedzieć na pytanie „ile wydałem i na co".
    `model_policy`). Dodanie kolumny `kind` do `jobs` dałoby jedno i drugie: listę „żywe, ale
    nieskonfigurowane" oraz **koszt per feature** na stronie §11 (dziś ledger grupuje wyłącznie
    po projekcie). Naturalny następny krok, tutaj nie zrobiony.
+   **Uwaga operacyjna (review Codeksa):** `COSTS_AUTH_SECRET` czytany jest **raz, przy starcie**
+   i trzymany przez życie procesu — więc sama edycja `.env` **NIE odbiera dostępu**, dopóki
+   `llmbus-costs` nie zostanie zrestartowany. Udokumentowane w `deploy/README.md` §6 i w
+   `.env.example`; celowo nie przeładowujemy sekretu per żądanie (odczyt pliku na każdym
+   requeście to gorszy kompromis niż restart przy rotacji).
+   **Zapis równoległy:** osiem równoczesnych POST-ów na osobnych połączeniach SQLite commituje
+   każdą parę (test Codeksa, realny store, nie mock). Równoczesny zapis tej **samej** pary to
+   świadomie **last-writer-wins** — to jest ta sama semantyka co upsert, a nie przeoczenie.
 
 24. **Transkrypcja (Whisper) na busie — §4 przestaje być tylko-chatowe.** **OTWARTE
    (postawione 2026-07-23), user potwierdził, że tego potrzebuje** (milamber:

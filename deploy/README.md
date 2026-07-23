@@ -200,6 +200,14 @@ secret is the password. Read the secret back with:
 ssh bartek@100.124.41.86 'grep "^COSTS_AUTH_SECRET=" ~/Projects/llmbus/.env'
 ```
 
+**Rotating or revoking the secret needs a restart.** It is read once at startup and held
+for the life of the process, so editing `.env` alone does NOT revoke access — anyone with
+the old secret keeps it until `llmbus-costs` restarts:
+
+```bash
+ssh bartek@100.124.41.86 'cd ~/Projects/llmbus && sed -i "s|^COSTS_AUTH_SECRET=.*|COSTS_AUTH_SECRET=$(openssl rand -hex 24)|" .env && sudo systemctl restart llmbus-costs && grep "^COSTS_AUTH_SECRET=" .env'
+```
+
 Guards, and why each exists:
 
 - **Basic auth**, constant-time compared. Base64 is encoding, not encryption — this is only
