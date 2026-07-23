@@ -19,9 +19,11 @@ from llmbus.config import (
     iggy_connection_string,
     load_config,
     load_costs_bind,
+    load_costs_secret,
     load_store_path,
     parse_config,
     parse_costs_bind,
+    parse_costs_secret,
     parse_store_path,
 )
 from llmbus.providers.anthropic import AnthropicAdapter
@@ -383,6 +385,43 @@ def test_load_costs_bind_reads_dotenv_then_environ_by_default(monkeypatch):
     monkeypatch.setenv("COSTS_PORT", "8093")
 
     assert load_costs_bind() == CostsBind(("127.0.0.1", "100.124.41.86"), 8093)
+    assert loaded["called"] is True
+
+
+# --- parse_costs_secret / load_costs_secret (policy page auth, §14 #23) ------
+
+
+def test_costs_secret_is_none_when_unset():
+    # Fail-SAFE, not fail-open: no secret means the policy page refuses to serve,
+    # never that it serves unauthenticated.
+    assert parse_costs_secret({}) is None
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_a_blank_costs_secret_counts_as_unset(blank):
+    # A half-filled .env line must never produce a weak secret.
+    assert parse_costs_secret({"COSTS_AUTH_SECRET": blank}) is None
+
+
+def test_costs_secret_is_returned_stripped():
+    assert parse_costs_secret({"COSTS_AUTH_SECRET": "  s3cret  "}) == "s3cret"
+
+
+def test_load_costs_secret_bypasses_dotenv_when_env_is_injected(monkeypatch):
+    monkeypatch.setattr(config, "load_dotenv", _fail_if_called)
+    assert load_costs_secret({"COSTS_AUTH_SECRET": "s3cret"}) == "s3cret"
+
+
+def test_load_costs_secret_reads_dotenv_then_environ_by_default(monkeypatch):
+    loaded = {"called": False}
+
+    def _fake_load_dotenv():
+        loaded["called"] = True
+
+    monkeypatch.setattr(config, "load_dotenv", _fake_load_dotenv)
+    monkeypatch.setenv("COSTS_AUTH_SECRET", "from-environ")
+
+    assert load_costs_secret() == "from-environ"
     assert loaded["called"] is True
 
 

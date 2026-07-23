@@ -182,6 +182,35 @@ The unit is ordered `After=tailscaled.service` on purpose: `COSTS_BIND_HOSTS` na
 literal tailnet address, and binding it before `tailscale0` has that address fails with
 `EADDRNOTAVAIL` — the same trap documented for `sites-enabled/nmed` and `capcycle-web`.
 
+## 6. The model policy page (`/policy`)
+
+`http://100.124.41.86:8093/policy` shows which model each `(project, kind)` runs on and
+lets you change it. Unlike the cost ledger it is a **write** surface, so it is guarded.
+
+Enable it by adding a secret to `.env` (unset = the page returns 503, not an open page):
+
+```bash
+ssh bartek@100.124.41.86 'cd ~/Projects/llmbus && printf "COSTS_AUTH_SECRET=%s\n" "$(openssl rand -hex 24)" >> .env && chmod 600 .env && sudo systemctl restart llmbus-costs'
+```
+
+Then browse to `/policy`; the browser prompts for credentials. **Any username works** — the
+secret is the password. Read the secret back with:
+
+```bash
+ssh bartek@100.124.41.86 'grep "^COSTS_AUTH_SECRET=" ~/Projects/llmbus/.env'
+```
+
+Guards, and why each exists:
+
+- **Basic auth**, constant-time compared. Base64 is encoding, not encryption — this is only
+  acceptable because Tailscale encrypts the transport and the bind never includes a public
+  interface. Do not expose this port.
+- **Cross-origin POSTs are refused (403).** Browsers re-send cached Basic credentials
+  automatically, so authentication alone would not stop another origin driving the endpoint.
+- **The model is a dropdown of registered models only**, grouped by capability, and the add
+  form opens on a placeholder rather than pre-selecting one. Adding a model or changing a
+  price stays a code change with a verified rate — never editable here.
+
 ## Redeploys
 
 - **Worker** (after a merge to main): `bash ~/Projects/llmbus/deploy/deploy.sh`

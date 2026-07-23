@@ -22,6 +22,7 @@ from llmbus.server import (
     build_servers,
     main,
     make_handler,
+    parse_policy_form,
     render_page,
     resolve_bind,
     serve_forever,
@@ -327,3 +328,262 @@ def test_config_error_from_the_store_path_is_reported_not_raised(tmp_path, monke
 
     assert main([]) == 2
     assert "missing required setting STORE_PATH" in capsys.readouterr().err
+
+
+# --- the policy page: form parsing (§14 #23) ---------------------------------
+
+
+def test_parse_policy_form_reads_all_three_fields():
+    assert parse_policy_form("project=milamber&kind=language.chat&model=gpt-5.4") == (
+        "milamber",
+        "language.chat",
+        "gpt-5.4",
+    )
+
+
+def test_parse_policy_form_strips_surrounding_whitespace():
+    assert parse_policy_form("project=+milamber+&kind=+a+&model=gpt-5.4") == (
+        "milamber",
+        "a",
+        "gpt-5.4",
+    )
+
+
+@pytest.mark.parametrize("missing", ["project", "kind", "model"])
+def test_parse_policy_form_requires_every_field(missing):
+    fields = {"project": "milamber", "kind": "a", "model": "gpt-5.4"}
+    del fields[missing]
+    body = "&".join(f"{k}={v}" for k, v in fields.items())
+
+    with pytest.raises(ValueError, match=f"missing required field '{missing}'"):
+        parse_policy_form(body)
+
+
+@pytest.mark.parametrize("blank", ["", "+", "%20"])
+def test_parse_policy_form_treats_a_blank_kind_as_missing(blank):
+    # A blank kind would create a policy row no job can ever match.
+    with pytest.raises(ValueError, match="kind"):
+        parse_policy_form(f"project=milamber&kind={blank}&model=gpt-5.4")
+
+
+def test_parse_policy_form_refuses_a_model_the_bus_does_not_route():
+    # The form only offers registered models, but a form is a client-side
+    # construct and this is a write endpoint: anyone authenticated can post
+    # whatever they like.
+    with pytest.raises(ValueError, match="not registered with the bus"):
+        parse_policy_form("project=milamber&kind=a&model=gpt-9000")
+
+
+def test_parse_policy_form_ignores_unknown_extra_fields():
+    assert parse_policy_form("project=a&kind=b&model=gpt-5.4&surprise=1")[0] == "a"
+
+
+# --- the policy page: live HTTP ----------------------------------------------
+
+
+_SECRET = "s3cret"
+
+
+def _auth_header(password=_SECRET):
+    import base64
+
+    return {"Authorization": "Basic " + base64.b64encode(f"x:{password}".encode()).decode()}
+
+
+@pytest.fixture
+def policy_server(tmp_path):
+    """A real server WITH a secret configured, on an ephemeral loopback port."""
+    from http.server import ThreadingHTTPServer
+
+    path = str(tmp_path / "store.db")
+    _seed(path)
+
+    async def _policy():
+        async with Store(path) as store:
+            await store.set_model_policy("milamber", "language.chat", "gpt-5.5")
+
+    asyncio.run(_policy())
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(path, _SECRET))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", path
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _request(url, *, method="GET", headers=None, data=None):
+    request = urllib.request.Request(
+        url, method=method, headers=headers or {}, data=data.encode() if data else None
+    )
+    return urllib.request.urlopen(request)
+
+
+def test_the_cost_page_still_needs_no_credentials(policy_server):
+    base, _ = policy_server
+    with _request(f"{base}/") as response:
+        assert response.status == 200
+
+
+def test_the_policy_page_demands_credentials(policy_server):
+    base, _ = policy_server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _request(f"{base}/policy")
+
+    assert caught.value.code == 401
+    assert caught.value.headers["WWW-Authenticate"] == 'Basic realm="llmbus policy"'
+
+
+def test_a_wrong_secret_is_refused(policy_server):
+    base, _ = policy_server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _request(f"{base}/policy", headers=_auth_header("wrong"))
+
+    assert caught.value.code == 401
+
+
+def test_the_right_secret_shows_the_policy(policy_server):
+    base, _ = policy_server
+    with _request(f"{base}/policy", headers=_auth_header()) as response:
+        body = response.read().decode()
+
+    assert response.status == 200
+    assert "language.chat" in body
+    assert '<option value="gpt-5.5" selected>' in body
+
+
+def test_posting_a_policy_writes_it_and_reports_back(policy_server):
+    base, path = policy_server
+
+    with _request(
+        f"{base}/policy",
+        method="POST",
+        headers=_auth_header(),
+        data="project=milamber&kind=language.chat&model=gpt-5-nano",
+    ) as response:
+        body = response.read().decode()
+
+    assert response.status == 200
+    assert "milamber/language.chat now runs on gpt-5-nano" in body
+
+    async def _read():
+        async with Store(path) as store:
+            return await store.model_policy("milamber", "language.chat")
+
+    assert asyncio.run(_read()).model == "gpt-5-nano"
+
+
+def test_posting_without_credentials_changes_nothing(policy_server):
+    base, path = policy_server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _request(
+            f"{base}/policy",
+            method="POST",
+            data="project=milamber&kind=language.chat&model=gpt-5-nano",
+        )
+
+    assert caught.value.code == 401
+
+    async def _read():
+        async with Store(path) as store:
+            return await store.model_policy("milamber", "language.chat")
+
+    assert asyncio.run(_read()).model == "gpt-5.5"
+
+
+def test_a_cross_origin_post_is_refused(policy_server):
+    # Browsers re-send cached Basic credentials, so authentication alone would
+    # not stop another origin driving this endpoint.
+    base, _ = policy_server
+    headers = _auth_header() | {"Origin": "http://evil.example"}
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _request(
+            f"{base}/policy",
+            method="POST",
+            headers=headers,
+            data="project=a&kind=b&model=gpt-5.4",
+        )
+
+    assert caught.value.code == 403
+
+
+def test_a_bad_model_is_a_400_that_re_renders_the_page(policy_server):
+    base, _ = policy_server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _request(
+            f"{base}/policy",
+            method="POST",
+            headers=_auth_header(),
+            data="project=a&kind=b&model=gpt-9000",
+        )
+
+    assert caught.value.code == 400
+    assert "not registered with the bus" in caught.value.read().decode()
+
+
+def test_an_oversized_form_is_refused_before_being_read(policy_server):
+    base, _ = policy_server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _request(
+            f"{base}/policy",
+            method="POST",
+            headers=_auth_header(),
+            data="project=a&kind=b&model=gpt-5.4&pad=" + "x" * 5000,
+        )
+
+    assert caught.value.code == 413
+
+
+def test_posting_to_an_unknown_path_is_a_404(policy_server):
+    base, _ = policy_server
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _request(f"{base}/nope", method="POST", headers=_auth_header(), data="x=1")
+
+    assert caught.value.code == 404
+
+
+# --- with no secret configured, the write surface does not exist -------------
+
+
+@pytest.fixture
+def unsecured_server(tmp_path):
+    from http.server import ThreadingHTTPServer
+
+    path = str(tmp_path / "store.db")
+    _seed(path)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_without_a_secret_the_policy_page_is_off_not_open(unsecured_server):
+    # The fail-safe: upgrading without setting COSTS_AUTH_SECRET must not hand
+    # anyone on the tailnet a way to change which model every project runs on.
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _request(f"{unsecured_server}/policy")
+
+    assert caught.value.code == 503
+    assert "COSTS_AUTH_SECRET" in caught.value.read().decode()
+
+
+def test_without_a_secret_a_post_is_also_refused(unsecured_server):
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _request(
+            f"{unsecured_server}/policy",
+            method="POST",
+            data="project=a&kind=b&model=gpt-5.4",
+        )
+
+    assert caught.value.code == 503
+
+
+def test_without_a_secret_the_cost_page_is_unaffected(unsecured_server):
+    with _request(f"{unsecured_server}/") as response:
+        assert response.status == 200

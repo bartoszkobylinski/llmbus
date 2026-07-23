@@ -39,20 +39,31 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import BaseServer
+from urllib.parse import parse_qs
 
 from llmbus.cli import collect_summary, require_existing_store, resolve_store_path
 from llmbus.config import (
     ConfigError,
     CostsBind,
     load_costs_bind,
+    load_costs_secret,
     validate_costs_hosts,
     validate_costs_port,
 )
 from llmbus.dashboard import render_dashboard
+from llmbus.policy_page import render_policy_page
+from llmbus.providers.base import CAPABILITIES
+from llmbus.store import ModelPolicy, Store
+from llmbus.webauth import BASIC_REALM, basic_auth_ok, origin_allowed
 
 # Only the ledger itself is served. No static assets, no other routes: the page
 # inlines its own CSS and pulls nothing, so anything else is a 404 by design.
 _PAGE_PATHS = frozenset({"/", "/index.html"})
+_POLICY_PATH = "/policy"
+# A policy form is a handful of short fields. Anything larger is not a form, and
+# reading it into memory would be the only interesting thing an unauthenticated
+# caller could make this process do.
+_MAX_FORM_BYTES = 4096
 
 ServerFactory = Callable[[tuple[str, int], type[BaseHTTPRequestHandler]], ThreadingHTTPServer]
 
@@ -63,7 +74,49 @@ def render_page(store_path: str) -> str:
     return render_dashboard(summary, datetime.now(UTC), store_path)
 
 
-def make_handler(store_path: str) -> type[BaseHTTPRequestHandler]:
+def render_policy_view(store_path: str, notice: str | None = None) -> str:
+    """Read the policy table and render it, re-reading on every request."""
+    return render_policy_page(asyncio.run(read_policies(store_path)), datetime.now(UTC), notice)
+
+
+async def read_policies(store_path: str) -> list[ModelPolicy]:
+    """Every policy row, for the policy page."""
+    async with Store(store_path) as store:
+        return await store.list_model_policies()
+
+
+async def write_policy(store_path: str, project: str, kind: str, model: str) -> None:
+    """Point `(project, kind)` at `model`."""
+    async with Store(store_path) as store:
+        await store.set_model_policy(project, kind, model)
+
+
+def parse_policy_form(body: str) -> tuple[str, str, str]:
+    """Pull `project`, `kind` and `model` out of a form body, or raise `ValueError`.
+
+    Pure, so the parsing rules are testable without a socket. Values are stripped
+    and all three are required: a blank `kind` would create a row no job can match,
+    and a blank `model` would write an empty string into the policy the producer
+    then resolves — both failures that surface far from here.
+
+    The model is checked against the registry rather than trusted. The form only
+    offers registered models, but a form is a client-side construct and this is a
+    write endpoint: anyone authenticated can post arbitrary fields.
+    """
+    fields = parse_qs(body, keep_blank_values=True)
+    values = []
+    for name in ("project", "kind", "model"):
+        raw = fields.get(name, [""])[0].strip()
+        if not raw:
+            raise ValueError(f"missing required field {name!r}")
+        values.append(raw)
+    project, kind, model = values
+    if model not in CAPABILITIES:
+        raise ValueError(f"model {model!r} is not registered with the bus")
+    return project, kind, model
+
+
+def make_handler(store_path: str, secret: str | None = None) -> type[BaseHTTPRequestHandler]:
     """A request handler bound to one store. Re-reads on every GET.
 
     Built by a factory rather than configured through a class attribute so two
@@ -75,19 +128,77 @@ def make_handler(store_path: str) -> type[BaseHTTPRequestHandler]:
         server_version = "llmbus-costs"
         protocol_version = "HTTP/1.1"
 
-        def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
-            if self.path not in _PAGE_PATHS:
-                self.send_error(HTTPStatus.NOT_FOUND, "no such page")
-                return
-            body = render_page(store_path).encode("utf-8")
-            self.send_response(HTTPStatus.OK)
+        def _send_html(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+            payload = body.encode("utf-8")
+            self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            # Spend changes as the worker runs; a cached page would quietly show
-            # yesterday's total to someone who just hit refresh to check today's.
+            self.send_header("Content-Length", str(len(payload)))
+            # Spend and policy both change under the reader; a cached page would
+            # quietly show a stale total, or a model that is no longer in force.
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(body)
+            self.wfile.write(payload)
+
+        def _guard(self) -> bool:
+            """True when the caller may use the policy page; else it has replied.
+
+            Order matters. An unconfigured secret answers 503 *before* asking for
+            credentials, so an operator who never set `COSTS_AUTH_SECRET` is told
+            the page is off rather than being prompted for a password that cannot
+            exist.
+            """
+            if secret is None:
+                self.send_error(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "policy page disabled: COSTS_AUTH_SECRET is not set",
+                )
+                return False
+            if not basic_auth_ok(self.headers.get("Authorization"), secret):
+                self.send_response(HTTPStatus.UNAUTHORIZED)
+                self.send_header("WWW-Authenticate", f'Basic realm="{BASIC_REALM}"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+            return True
+
+        def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
+            if self.path in _PAGE_PATHS:
+                self._send_html(render_page(store_path))
+                return
+            if self.path == _POLICY_PATH:
+                if self._guard():
+                    self._send_html(render_policy_view(store_path))
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "no such page")
+
+        def do_POST(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
+            if self.path != _POLICY_PATH:
+                self.send_error(HTTPStatus.NOT_FOUND, "no such page")
+                return
+            if not self._guard():
+                return
+            # Browsers cache Basic credentials and re-send them, so a page on
+            # another origin could otherwise drive this endpoint (webauth.py).
+            if not origin_allowed(self.headers.get("Origin"), self.headers.get("Host")):
+                self.send_error(HTTPStatus.FORBIDDEN, "cross-origin write refused")
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > _MAX_FORM_BYTES:
+                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "form too large")
+                return
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            try:
+                project, kind, model = parse_policy_form(raw)
+            except ValueError as error:
+                self._send_html(
+                    render_policy_view(store_path, notice=str(error)),
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            asyncio.run(write_policy(store_path, project, kind, model))
+            self._send_html(
+                render_policy_view(store_path, notice=f"{project}/{kind} now runs on {model}")
+            )
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             # journalctl already timestamps; keep one line per request, on stderr.
@@ -111,7 +222,7 @@ def build_servers(
     the module attribute would silently open a real socket instead.
     """
     server_factory = factory or ThreadingHTTPServer
-    handler = make_handler(store_path)
+    handler = make_handler(store_path, load_costs_secret())
     opened: list[ThreadingHTTPServer] = []
     try:
         for host in bind.hosts:

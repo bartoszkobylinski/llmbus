@@ -792,6 +792,33 @@ potrzebne, żeby odpowiedzieć na pytanie „ile wydałem i na co".
    a `Job.task` powstaje dopiero w §4 v2 (#24). Dziś więc zdolność jest **danymi dla UI**
    (filtr dropdownu), nie bramką w kodzie. Nie udawajmy, że jest inaczej: dopóki wszystkie
    zarejestrowane modele są `chat`, niezgodności nie da się nawet wyprodukować.
+   **Strona polityki — WDROŻONA (PR `model-policy-page`).** `/policy` na tym samym porcie co
+   ledger (8093): tabela `(project, kind) → model` z formularzem **per wiersz** (zapis jednej
+   polityki nie może przepisać innej) plus formularz dodania pary.
+   **Auth — decyzja usera: shared secret w `.env` (`COSTS_AUTH_SECRET`), HTTP Basic.** Trzy
+   zabezpieczenia, każde przeciw konkretnej pomyłce, nie dla ozdoby:
+   (a) **brak sekretu = strona WYŁĄCZONA (503), nigdy otwarta** — upgrade bez ustawienia
+   klucza nie może po cichu dać komukolwiek w tailnecie możliwości przestawienia modelu
+   wszystkim projektom; (b) **POST z obcego origin = 403** — przeglądarka sama dosyła
+   zapamiętane poświadczenia Basic, więc samo uwierzytelnienie NIE zatrzymałoby CSRF;
+   (c) **model to `<select>` po zarejestrowanych**, grupowany po capability, a formularz
+   dodawania otwiera się na placeholderze — „nie dotknąłem dropdownu" nie może znaczyć
+   „wybrałem model" przy ~600× rozrzutu cen; posłany model i tak jest sprawdzany po stronie
+   serwera (formularz to konstrukcja klienta, a to jest endpoint zapisu).
+   Basic to base64, **nie szyfrowanie** — dopuszczalne WYŁĄCZNIE dlatego, że transport
+   szyfruje Tailscale, a bind nigdy nie obejmuje interfejsu publicznego
+   (`validate_costs_hosts`). Jeśli którakolwiek z tych dwóch rzeczy przestanie być prawdą,
+   to jest hasło jawnym tekstem na drucie.
+   **Bramka mutacyjna znowu zapłaciła za siebie, i to na module bezpieczeństwa:** `b64decode`
+   był wołany z `validate=True`, ale nic nie dowodziło, że to ma znaczenie — bez tego dekoder
+   **po cichu wyrzuca** znaki spoza alfabetu, więc `eDpz!M2NyZXQ=` dekoduje się do tych samych
+   bajtów co prawdziwe poświadczenia i **uwierzytelnia**. Znalazł to przeżywający mutant; jest
+   na to test.
+   **Znane ograniczenie, świadome:** strona pokazuje tylko pary **skonfigurowane**, nie te,
+   których joby faktycznie używają — tabela `jobs` **nie zapisuje `kind`** (ma go tylko
+   `model_policy`). Dodanie kolumny `kind` do `jobs` dałoby jedno i drugie: listę „żywe, ale
+   nieskonfigurowane" oraz **koszt per feature** na stronie §11 (dziś ledger grupuje wyłącznie
+   po projekcie). Naturalny następny krok, tutaj nie zrobiony.
 
 24. **Transkrypcja (Whisper) na busie — §4 przestaje być tylko-chatowe.** **OTWARTE
    (postawione 2026-07-23), user potwierdził, że tego potrzebuje** (milamber:

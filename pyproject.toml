@@ -134,6 +134,11 @@ source_paths = [
     # no filesystem — all of that is in cli.py — so its mutants die to plain
     # unit tests. cli.py itself is the I/O shell and is not mutated.
     "src/llmbus/dashboard.py",
+    # The policy page's view + auth (§14 #23). Both pure: rows/headers in,
+    # HTML/verdict out. webauth in particular MUST be mutated — an auth check
+    # that fails open under one flipped operator is the risk being guarded.
+    "src/llmbus/policy_page.py",
+    "src/llmbus/webauth.py",
 ]
 # config.py, store.py, worker.py and client.py are integration/I/O-touching (SDK
 # clients, SQLite, Iggy), so they are *not* mutated. But their unit tests import

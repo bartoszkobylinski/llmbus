@@ -294,6 +294,29 @@ def load_costs_bind(env: Mapping[str, str] | None = None) -> CostsBind:
     return parse_costs_bind(env)
 
 
+def parse_costs_secret(env: Mapping[str, str]) -> str | None:
+    """The shared secret guarding the policy page, or `None` when unset (§14 #23).
+
+    Optional on purpose, and its absence is **fail-safe rather than fail-open**:
+    no secret means the policy page refuses to serve at all, not that it serves
+    unauthenticated. A deployment that upgrades without setting this keeps exactly
+    the read-only surface it had before, instead of silently gaining a way to
+    change which model every project runs on.
+
+    Blank counts as unset, like every other optional setting — a half-filled
+    `.env` line must never produce a weak secret.
+    """
+    return _optional(env, "COSTS_AUTH_SECRET")
+
+
+def load_costs_secret(env: Mapping[str, str] | None = None) -> str | None:
+    """`parse_costs_secret` over `.env` + `os.environ`, or an injected mapping."""
+    if env is None:
+        load_dotenv()
+        env = os.environ
+    return parse_costs_secret(env)
+
+
 def parse_worker_policy(env: Mapping[str, str]) -> WorkerPolicy:
     """Parse the worker's retry/timeout/token policy from an environment mapping.
 

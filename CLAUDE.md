@@ -66,7 +66,9 @@ src/llmbus/
   store.py       # SQLite results
   dashboard.py   # cost ledger → HTML (pure: rows in, string out)
   cli.py         # `llmbus-costs` entrypoint (I/O shell around dashboard.py)
-  server.py      # `llmbus-costs-serve` — same page over HTTP (stdlib only)
+  server.py      # `llmbus-costs-serve` — cost + policy pages over HTTP (stdlib only)
+  policy_page.py # model-policy page (pure renderer)
+  webauth.py     # Basic auth + CSRF origin check (pure)
   config.py
 tests/
   unit/          # pure logic, no network, no Iggy
