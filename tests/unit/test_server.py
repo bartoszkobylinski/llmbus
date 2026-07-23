@@ -8,9 +8,11 @@ survives the test.
 """
 
 import asyncio
+import socket
 import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pytest
@@ -18,10 +20,12 @@ import pytest
 from llmbus.config import CostsBind
 from llmbus.schema import Job, Message, Result, Usage
 from llmbus.server import (
+    _MAX_FORM_BYTES,
     build_parser,
     build_servers,
     main,
     make_handler,
+    parse_content_length,
     parse_policy_form,
     render_page,
     resolve_bind,
@@ -420,6 +424,20 @@ def _request(url, *, method="GET", headers=None, data=None):
     return urllib.request.urlopen(request)
 
 
+def _raw_policy_request(base, headers, body=b""):
+    """Send wire-level requests urllib correctly refuses to construct."""
+    host, port = base.removeprefix("http://").rsplit(":", 1)
+    request = (
+        f"POST /policy HTTP/1.1\r\nHost: {host}:{port}\r\n"
+        + "".join(f"{name}: {value}\r\n" for name, value in headers.items())
+        + "Connection: close\r\n\r\n"
+    ).encode() + body
+    with socket.create_connection((host, int(port)), timeout=1) as client:
+        client.sendall(request)
+        client.shutdown(socket.SHUT_WR)
+        return client.recv(4096)
+
+
 def test_the_cost_page_still_needs_no_credentials(policy_server):
     base, _ = policy_server
     with _request(f"{base}/") as response:
@@ -472,6 +490,33 @@ def test_posting_a_policy_writes_it_and_reports_back(policy_server):
             return await store.model_policy("milamber", "language.chat")
 
     assert asyncio.run(_read()).model == "gpt-5-nano"
+
+
+def test_concurrent_policy_posts_commit_each_distinct_pair(policy_server):
+    # The handler creates a Store per request on a ThreadingHTTPServer thread;
+    # exercise those separate SQLite connections rather than a mocked store.
+    base, path = policy_server
+
+    def post(index):
+        data = f"project=project-{index}&kind=language.chat&model=gpt-5-nano"
+        with _request(
+            f"{base}/policy", method="POST", headers=_auth_header(), data=data
+        ) as response:
+            return response.status
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        statuses = list(pool.map(post, range(8)))
+
+    assert statuses == [200] * 8
+
+    async def _read():
+        async with Store(path) as store:
+            return await store.list_model_policies()
+
+    policies = asyncio.run(_read())
+    assert {(policy.project, policy.kind, policy.model) for policy in policies} >= {
+        (f"project-{index}", "language.chat", "gpt-5-nano") for index in range(8)
+    }
 
 
 def test_posting_without_credentials_changes_nothing(policy_server):
@@ -536,6 +581,48 @@ def test_an_oversized_form_is_refused_before_being_read(policy_server):
     assert caught.value.code == 413
 
 
+@pytest.mark.parametrize("content_length", ["-1", "not-a-number"])
+def test_malformed_content_length_is_a_400_and_never_writes_a_policy(policy_server, content_length):
+    # Content-Length is untrusted input. Negative values must not become
+    # rfile.read(-1) (read until EOF), and an invalid integer must not abort the
+    # handler without an HTTP response.
+    base, path = policy_server
+    response = _raw_policy_request(
+        base,
+        _auth_header() | {"Content-Length": content_length},
+        b"project=attacker&kind=language.chat&model=gpt-5-nano",
+    )
+
+    assert response.startswith(b"HTTP/1.1 400")
+
+    async def _read():
+        async with Store(path) as store:
+            return await store.model_policy("attacker", "language.chat")
+
+    assert asyncio.run(_read()) is None
+
+
+def test_a_body_shorter_than_its_content_length_is_a_400_and_never_writes(policy_server):
+    # EOF before the declared length is malformed framing, not permission to
+    # parse and commit a partial body. A client can otherwise claim one more
+    # byte than it sends and still make a valid form take effect.
+    base, path = policy_server
+    body = b"project=attacker&kind=language.chat&model=gpt-5-nano"
+    response = _raw_policy_request(
+        base,
+        _auth_header() | {"Content-Length": str(len(body) + 1)},
+        body,
+    )
+
+    assert response.startswith(b"HTTP/1.1 400")
+
+    async def _read():
+        async with Store(path) as store:
+            return await store.model_policy("attacker", "language.chat")
+
+    assert asyncio.run(_read()) is None
+
+
 def test_posting_to_an_unknown_path_is_a_404(policy_server):
     base, _ = policy_server
     with pytest.raises(urllib.error.HTTPError) as caught:
@@ -587,3 +674,68 @@ def test_without_a_secret_a_post_is_also_refused(unsecured_server):
 def test_without_a_secret_the_cost_page_is_unaffected(unsecured_server):
     with _request(f"{unsecured_server}/") as response:
         assert response.status == 200
+
+
+# --- Content-Length is attacker-controlled input (§14 #23) -------------------
+
+
+def test_absent_content_length_is_a_body_less_post_not_an_error():
+    assert parse_content_length(None) == 0
+
+
+def test_a_declared_length_is_returned():
+    assert parse_content_length("42") == 42
+
+
+def test_zero_is_a_legal_length():
+    assert parse_content_length("0") == 0
+
+
+@pytest.mark.parametrize("raw", ["-1", "-4096"])
+def test_a_negative_length_is_refused(raw):
+    # The dangerous one: rfile.read(-1) means "read until EOF", so a negative
+    # value would BOTH skip the size cap and stream unbounded data into memory.
+    with pytest.raises(ValueError, match="negative Content-Length"):
+        parse_content_length(raw)
+
+
+@pytest.mark.parametrize("raw", ["not-a-number", "", "1.5", "0x10", "4 096"])
+def test_a_non_numeric_length_raises_rather_than_escaping_the_handler(raw):
+    # An uncaught ValueError kills the serving thread and the client gets no
+    # HTTP response at all.
+    with pytest.raises(ValueError):
+        parse_content_length(raw)
+
+
+def test_a_form_exactly_at_the_cap_is_accepted(policy_server):
+    # Pins the boundary as <=, not <: a body of exactly _MAX_FORM_BYTES is legal.
+    base, path = policy_server
+    prefix = "project=edge&kind=k&model=gpt-5-nano&pad="
+    body = prefix + "x" * (_MAX_FORM_BYTES - len(prefix))
+    assert len(body) == _MAX_FORM_BYTES
+
+    with _request(f"{base}/policy", method="POST", headers=_auth_header(), data=body) as response:
+        assert response.status == 200
+
+    async def _read():
+        async with Store(path) as store:
+            return await store.model_policy("edge", "k")
+
+    assert asyncio.run(_read()).model == "gpt-5-nano"
+
+
+def test_one_byte_over_the_cap_is_refused(policy_server):
+    base, path = policy_server
+    prefix = "project=over&kind=k&model=gpt-5-nano&pad="
+    body = prefix + "x" * (_MAX_FORM_BYTES - len(prefix) + 1)
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        _request(f"{base}/policy", method="POST", headers=_auth_header(), data=body)
+
+    assert caught.value.code == 413
+
+    async def _read():
+        async with Store(path) as store:
+            return await store.model_policy("over", "k")
+
+    assert asyncio.run(_read()) is None

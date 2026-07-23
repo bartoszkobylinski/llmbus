@@ -116,6 +116,27 @@ def parse_policy_form(body: str) -> tuple[str, str, str]:
     return project, kind, model
 
 
+def parse_content_length(raw: str | None) -> int:
+    """A request's declared body length, or raise `ValueError`.
+
+    `Content-Length` is attacker-controlled input on a write endpoint, so every
+    malformed shape is refused here rather than reaching `rfile.read`:
+
+    - **absent** is 0 (a body-less POST), not an error;
+    - **non-numeric** must not raise out of the handler — an uncaught `ValueError`
+      kills the thread and the client gets no HTTP response at all;
+    - **negative** is the dangerous one: `rfile.read(-1)` means *read until EOF*,
+      so `-1` would both skip the size cap and let a client stream unbounded data
+      into memory.
+    """
+    if raw is None:
+        return 0
+    length = int(raw)  # ValueError propagates: the caller turns it into a 400.
+    if length < 0:
+        raise ValueError(f"negative Content-Length {length}")
+    return length
+
+
 def make_handler(store_path: str, secret: str | None = None) -> type[BaseHTTPRequestHandler]:
     """A request handler bound to one store. Re-reads on every GET.
 
@@ -182,11 +203,23 @@ def make_handler(store_path: str, secret: str | None = None) -> type[BaseHTTPReq
             if not origin_allowed(self.headers.get("Origin"), self.headers.get("Host")):
                 self.send_error(HTTPStatus.FORBIDDEN, "cross-origin write refused")
                 return
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = parse_content_length(self.headers.get("Content-Length"))
+            except ValueError:
+                self.send_error(HTTPStatus.BAD_REQUEST, "malformed Content-Length")
+                return
             if length > _MAX_FORM_BYTES:
                 self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "form too large")
                 return
-            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            body = self.rfile.read(length)
+            if len(body) != length:
+                # EOF before the declared length is malformed framing, not
+                # permission to act on what did arrive. Parsing a truncated body
+                # would let a client under-send and still have a valid form
+                # committed.
+                self.send_error(HTTPStatus.BAD_REQUEST, "truncated request body")
+                return
+            raw = body.decode("utf-8", errors="replace")
             try:
                 project, kind, model = parse_policy_form(raw)
             except ValueError as error:
