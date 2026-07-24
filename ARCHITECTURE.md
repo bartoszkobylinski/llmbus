@@ -827,6 +827,25 @@ potrzebne, żeby odpowiedzieć na pytanie „ile wydałem i na co".
    **Zapis równoległy:** osiem równoczesnych POST-ów na osobnych połączeniach SQLite commituje
    każdą parę (test Codeksa, realny store, nie mock). Równoczesny zapis tej **samej** pary to
    świadomie **last-writer-wins** — to jest ta sama semantyka co upsert, a nie przeoczenie.
+   **UZUPEŁNIENIE (2026-07-24) — integracja milambera: fasada + fazy, i decyzja „kto płaci".**
+   Pełny przegląd powierzchni LLM milambera: 21 wywołań, 24 `kind`
+   (`analysis/milamber-llm-surface.md` + plan `analysis/milamber-bus-migration-plan.md` w repo
+   milambera; wcześniejszy przegląd busa: `notes/milamber-integration-survey.md`). Ustalenia:
+   **(a) Jedna wewnętrzna FASADA w milamberze, nie 15 przepięć.** Każdy moduł woła
+   `complete_chat(kind, …)`; transport (`direct`|`bus`) to wewnętrzna decyzja per `kind`, która
+   przełącza się `direct→bus`, gdy znika bloker. Dziś nie ma wspólnego wrappera — 21 miejsc
+   samodzielnie woła OpenAI i osobno liczy koszt; fasada to realna konsolidacja (wywołanie +
+   koszt + ledger + transport w jednym szwie).
+   **(b) „Interaktywne" NIE jest twardym blokerem dla milambera.** milamber **niczego nie
+   streamuje** (grep czysty: brak `stream=True`/SSE), więc przepięcie na busa nie traci UX
+   streamingu — dokłada tylko latencję, a przy jednoosobowej skali serial-worker (§5) rzadko
+   blokuje. To **zawęża** linię „milamber = non-goal": kolejność gatuje *zdolność kontraktu*
+   (vision/whisper/embedding) i *kto płaci*, nie „interaktywność" sama w sobie.
+   **(c) „Kto płaci" — DECYZJA: `language.*` rozlicza KLUCZE UŻYTKOWNIKA** (`KEY_SOURCE_OWN`,
+   `language/usage.py:37`). Nie zostają jednak „na zawsze direct": bus dostaje wejście
+   BYOK/bill-back (**#25**), więc `language.*` (i każdy przyszły konsument, którego użytkownicy
+   przynoszą własne klucze) pojedzie po busie, a koszt zostanie na użytkowniku, nie na koncie
+   centralnym. Fasada już ma wejścia `key_source`/`user_id` — to jest jej strona #25.
 
 24. **Transkrypcja (Whisper) na busie — §4 przestaje być tylko-chatowe.** **OTWARTE
    (postawione 2026-07-23), user potwierdził, że tego potrzebuje** (milamber:
@@ -860,3 +879,34 @@ potrzebne, żeby odpowiedzieć na pytanie „ile wydałem i na co".
    zostaje akceptowane przez jedno wydanie (deprecated), żeby żywy konsument nie musiał
    lądować w tej samej minucie co bus. Rate-limit (`ratelimit.py`) rezerwuje dziś tokeny —
    transkrypcja nie ma wejściowych, więc dostaje rezerwację tylko-requestową.
+
+25. **Klucz per-użytkownik / bill-back na busie (BYOK) — §4 dostaje wymiar „czyim kluczem".**
+   **OTWARTE (postawione 2026-07-24), user potwierdził, że będzie tego potrzebował szybko.**
+   **Problem:** część ruchu rozlicza **własny klucz końcowego użytkownika**, nie centralny
+   (milamber `language.*` przez `resolve_user_client`, `KEY_SOURCE_OWN`). To dziś trzyma te
+   `kind`-y **poza busem** — worker woła providera kluczem centralnym llmbusa, więc przepięcie
+   przeniosłoby koszt na konto centralne. User przewiduje kolejnych konsumentów (jak
+   hate-moderator, ale też instagram/language), których użytkownicy przynoszą własne klucze.
+   **TWARDE ograniczenie (jak audio w #24): surowy klucz NIE jedzie w ciele `Job`.** Topic to
+   trwały log audytowy (§11) na boxie bez swapu — sekret w nim wyciekłby na zawsze. `Job` niesie
+   **referencję** klucza, nie klucz.
+   **Proponowany kształt (kierunek do potwierdzenia):** `Job.key_ref: str | None` — `None` =
+   klucz centralny (dziś); ustawione = „użyj klucza, na który wskazuje ta referencja". Worker
+   rozwiązuje `key_ref` → klucz z **magazynu kluczy**, który sam czyta (model współlokacji jak
+   store §9b): mała, **szyfrowana** tabela `ref → key` po stronie llmbusa (milamber ma już
+   wzorzec szyfrowania per-user, `db/models/usage.py:35` + `crypto.py` — wzorzec do przejęcia,
+   ale llmbus **nie sięga** do bazy milambera; granica repo zostaje). Ledger (§6/§11) zapisuje
+   `key_source` (own|central) per job, żeby atrybucja kosztu była uczciwa i strona pokazała
+   wydatek „własnym kluczem" osobno.
+   **Konsekwencja dla rate-limitu (realna):** `ratelimit.py` jest **per-provider** (kwota
+   centralna). Job na kluczu użytkownika zużywa **jego** kwotę, nie centralną — więc token-bucket
+   musi być **per-klucz**, nie tylko per-provider, albo joby BYOK omijają/segmentują limiter.
+   Do rozstrzygnięcia razem z kształtem.
+   **Decyzje bezpieczeństwa PRZED budową:** gdzie żyją klucze i jak szyfrowane w spoczynku, kto
+   może je zapisać (to powierzchnia ZAPISU, jak strona polityki #23), jak `ref` mapuje się na
+   klucz, rotacja. **Dotyka non-goala „multi-tenant" (§1)** — ale wąska forma (referencja
+   rozwiązywana przez workera z magazynu) mieści się bez pełnej wielodostępności.
+   **Zakres na teraz (user):** 99% ruchu to jego klucz + klucz znajomego w `language`, więc
+   pierwsze cięcie może być minimalne (mała szyfrowana tabela `ref→key`, `Job.key_ref`
+   opcjonalny, worker go używa). To **osobny PR**, nie coś doklejonego po cichu do fasady
+   milambera. Odblokowuje fazę 2 planu milambera.

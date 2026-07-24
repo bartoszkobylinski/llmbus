@@ -1,5 +1,11 @@
 # milamber_assistant → llmbus — przegląd realnego kodu przed integracją
 
+> **AKTUALIZACJA (2026-07-24).** Rozszerzone i zdecydowane w repo milambera:
+> `analysis/milamber-llm-surface.md` (routing per `kind`) + `analysis/milamber-bus-migration-plan.md`
+> (fasada + fazy). Decyzje: `ARCHITECTURE.md` §14 #23 (uzupełnienie) i #25 (BYOK/bill-back).
+> Kluczowa zmiana wniosku: milamber **niczego nie streamuje**, więc „interaktywne" nie jest
+> twardym blokerem — patrz plan.
+
 **Data:** 2026-07-23. **Cel:** ustalić, ile z ruchu LLM milambera da się przepiąć na busa,
 żeby strona kosztu (§11) pokazywała *cały* wydatek na tokeny, a nie tylko
 `hate-moderator`. Wszystkie cytaty to `plik:linia` w
