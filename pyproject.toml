@@ -36,6 +36,9 @@ llmbus-costs = "llmbus.cli:main"
 # Same page, served over HTTP instead of written to a file — for milamber's
 # projects module, which links to a port on the tailnet (§11). Stdlib only.
 llmbus-costs-serve = "llmbus.server:main"
+# Upsert the central model-policy seed so a bused kind keeps the model it runs on
+# today (§14 #23). Idempotent; refuses an unroutable model or a missing store.
+llmbus-seed-policy = "llmbus.seed_cli:main"
 
 [dependency-groups]
 dev = [

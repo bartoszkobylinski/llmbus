@@ -48,6 +48,7 @@ uv run pytest -m "not integration"       # fast suite (no server needed)
 uv run pytest                            # full suite (requires local Iggy)
 uv run llmbus-costs --output costs.html  # cost ledger → standalone HTML (§11)
 uv run llmbus-costs-serve                # same page over HTTP (tailnet, no auth)
+uv run llmbus-seed-policy                # upsert the model-policy seed (parity, §14 #23)
 uv run mutmut run                        # mutation testing (scoped, see below)
 uv run mypy                              # static type gate (strict, src/ only)
 uv run ruff check . && uv run ruff format --check .
@@ -68,6 +69,8 @@ src/llmbus/
   cli.py         # `llmbus-costs` entrypoint (I/O shell around dashboard.py)
   server.py      # `llmbus-costs-serve` — cost + policy pages over HTTP (stdlib only)
   policy_page.py # model-policy page (pure renderer)
+  policy_seed.py # model-policy seed data (pure) — model parity, §14 #23
+  seed_cli.py    # `llmbus-seed-policy` — I/O shell around policy_seed.py
   webauth.py     # Basic auth + CSRF origin check (pure)
   config.py
 tests/

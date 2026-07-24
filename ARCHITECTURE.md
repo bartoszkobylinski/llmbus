@@ -765,6 +765,13 @@ potrzebne, żeby odpowiedzieć na pytanie „ile wydałem i na co".
    `jobs.model` jest `NOT NULL` — więc job bez modelu fizycznie nie może trafić do store'a.
    Worker mimo to sprawdza (`_model_of`, `process_job`) i zwraca błędny `Result` zamiast
    rzucać: jedna zła wiadomość na topicu nie może zatrzymać pętli konsumpcji (§14 #15).
+   **Seed parytetu (PR `seed-model-policy`):** `policy_seed.py` (czyste dane) +
+   `llmbus-seed-policy` (`seed_cli.py`, idempotentny upsert) wgrywają wiersz per
+   `(project, kind)` z modelem, na którym kind chodzi DZIŚ — żeby przepięcie na busa
+   (`model=None`) nie podmieniło modelu po cichu. Seed odmawia modelu spoza rejestru (ten
+   sam `provider_for`), więc niewroutowalny wiersz nie wjedzie na produkcję; dziś obejmuje
+   3 kindy `instagram.*` (pilot F1) na `gpt-5-nano`. `nutrition.estimate`/`training.*`
+   czekają, aż `gpt-5.2`/`gpt-5.4` trafią do rejestru.
    **UZUPEŁNIENIE (2026-07-23) — granulacja `kind` i ZDOLNOŚĆ modelu.** Przegląd milambera
    pokazał, że `(project, kind)` musi być drobniejsze, niż wyglądało, bo **jeden moduł używa
    kilku RÓŻNYCH rodzajów LLM-a**: samo `language/` to 7 wywołań chat, `ocr.py:79` (vision,
